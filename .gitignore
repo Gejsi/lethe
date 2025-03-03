@@ -7,3 +7,5 @@
 *.dll
 *.dylib
 *.exe
+
+.clangd

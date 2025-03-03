@@ -1,5 +1,5 @@
 CXX      := g++
-CXXFLAGS := -std=c++11
+CXXFLAGS := -std=c++20
 
 SRC_DIR  := src
 OBJ_DIR  := obj
@@ -12,11 +12,19 @@ TARGET   := $(BIN_DIR)/main
 SRCS     := $(wildcard $(SRC_DIR)/*.cpp)
 OBJS     := $(patsubst $(SRC_DIR)/%.cpp,$(OBJ_DIR)/%.o,$(SRCS))
 
-# Build mode flags
-DEBUG_FLAGS   := -O0 -g -Wall -Wextra -Werror -Wpedantic -Wshadow -Wconversion -Wsign-conversion -fsanitize=address -fsanitize=undefined -fno-omit-frame-pointer -DDEBUG
-RELEASE_FLAGS := -O3 -march=native -funroll-loops -flto -DNDEBUG
+# Paths to VoliMem
+VOLIMEM_DIR := $(HOME)/Desktop/libvolimem
+VOLIMEM_LIB := $(VOLIMEM_DIR)/build/lib
+VOLIMEM_INC := $(VOLIMEM_DIR)/include
 
-# Choose build mode (default is debug)
+CXXFLAGS += -isystem $(VOLIMEM_INC)
+LDFLAGS += -L$(VOLIMEM_LIB) -lvolimem
+
+# Build mode flags
+DEBUG_FLAGS   := -O0 -g -Wall -Wextra -Werror -Wpedantic -Wshadow -Wconversion -Wsign-conversion -fsanitize=address,leak,undefined -fno-omit-frame-pointer
+RELEASE_FLAGS := -O3 -march=native -funroll-loops -flto
+# Choose build mode, usage:
+# `make` or `make MODE=release`
 MODE ?= debug
 ifeq ($(MODE),release)
     CXXFLAGS += $(RELEASE_FLAGS)
@@ -32,14 +40,17 @@ all: $(TARGET)
 
 # Linking object files into the executable
 $(TARGET): $(OBJS)
-	$(CXX) $(CXXFLAGS) -o $@ $^
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
 # Compiling each .cpp file into an object file
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 clean:
-	rm -rf $(OBJ_DIR)/*.o $(TARGET)
+	rm -rf $(OBJ_DIR) $(BIN_DIR)
 
-.PHONY: all clean
+run: $(TARGET)
+	LD_LIBRARY_PATH=$(VOLIMEM_LIB) ./$(TARGET)
+
+.PHONY: all clean run
 

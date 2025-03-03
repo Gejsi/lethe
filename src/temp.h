@@ -1,7 +1,6 @@
-// temp.h
 #ifndef TEMP_H
 #define TEMP_H
 
-void foo(); // Declaration of the function
+void foo();
 
 #endif // TEMP_H
