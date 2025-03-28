@@ -13,7 +13,7 @@ SRCS     := $(wildcard $(SRC_DIR)/*.cpp)
 OBJS     := $(patsubst $(SRC_DIR)/%.cpp,$(OBJ_DIR)/%.o,$(SRCS))
 
 # Paths to VoliMem
-VOLIMEM_DIR := $(HOME)/Desktop/libvolimem
+VOLIMEM_DIR := $(HOME)/Desktop/voli
 VOLIMEM_LIB := $(VOLIMEM_DIR)/build/lib
 VOLIMEM_INC := $(VOLIMEM_DIR)/include
 
@@ -21,15 +21,13 @@ CXXFLAGS += -isystem $(VOLIMEM_INC)
 LDFLAGS += -L$(VOLIMEM_LIB) -lvolimem
 
 # Build mode flags
-DEBUG_FLAGS   := -O0 -g -Wall -Wextra -Werror -Wpedantic -Wshadow -Wconversion -Wsign-conversion -fsanitize=address,leak,undefined -fno-omit-frame-pointer
+DEBUG_FLAGS   := -O0 -g -Wall -Wextra -Werror -Wpedantic -Wshadow -Wconversion -Wsign-conversion -fsanitize=undefined -fno-omit-frame-pointer
 RELEASE_FLAGS := -O3 -march=native -funroll-loops -flto
-# Choose build mode, usage:
-# `make` or `make MODE=release`
 MODE ?= debug
 ifeq ($(MODE),release)
-    CXXFLAGS += $(RELEASE_FLAGS)
+	CXXFLAGS += $(RELEASE_FLAGS)
 else
-    CXXFLAGS += $(DEBUG_FLAGS)
+	CXXFLAGS += $(DEBUG_FLAGS)
 endif
 
 # Create required directories if they don't exist
