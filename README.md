@@ -1,4 +1,4 @@
-# Compile
+# Swappine
 
 Ensure VoliMem has been built and update `VOLIMEM_DIR` in the `Makefile` to the correct path.
 
