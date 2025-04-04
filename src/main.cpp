@@ -1,10 +1,9 @@
-#include <atomic>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/mman.h>
-#include <thread>
 #include <time.h>
 
 #include "volimem/idt.h"
@@ -13,7 +12,7 @@
 #include "volimem/volimem.h"
 
 #define UNUSED(x) (void)(x)
-#define START_ADDR 0xffff800000000000
+#define HEAP_START 0xffff800000000000
 
 constexpr size_t KB = 1024;
 constexpr size_t MB = KB * KB;
@@ -22,18 +21,11 @@ constexpr size_t GB = MB * KB;
 constexpr size_t PAGE_SIZE = 4 * KB;
 constexpr size_t CACHE_SIZE = 128 * MB;
 constexpr size_t NUM_PAGES = CACHE_SIZE / PAGE_SIZE;
-constexpr size_t SWAP_SIZE = 10 * GB;
-
-constexpr size_t SCAN_INTERVAL_MS = 1000;     // 1 second scan interval
-constexpr uint64_t EVICT_THRESHOLD_MS = 2000; // 2 seconds eviction interval
+constexpr size_t SWAP_SIZE = 1 * GB;
+constexpr size_t HEAP_SIZE = SWAP_SIZE;
 
 struct Page {
-  uint64_t vaddr;
-  uint64_t last_scan;
-  uint64_t last_access;
-  bool in_cache;
-  uint64_t swap_offset;
-  uint32_t hotness;
+  uintptr_t vaddr;
 };
 
 // addr_in cache = cache + gpa(vadrr) - gpa (cache)
@@ -41,126 +33,74 @@ struct Page {
 Page *pages; // page_index = (vaddr - cache_start) / page_size
 uint8_t pages_mutex;
 
-struct PageMeta {
-  uint64_t last_scan;
-  uint64_t last_access;
-  bool is_swapped;
-  size_t swap_offset;
-};
-
 void *cache_area; // client
 void *swap_area;  // server
-std::unordered_map<uint64_t, PageMeta> page_map;
-uint8_t map_mutex;
-std::atomic<bool> running{true};
 
-uint64_t get_timestamp() {
-  struct timespec timestamp;
-  clock_gettime(CLOCK_MONOTONIC, &timestamp);
-  return static_cast<uint64_t>(timestamp.tv_sec) * 1000 +
-         static_cast<uint64_t>(timestamp.tv_nsec) / 1000000;
-}
+// TODO: add fancy LRU logic
+size_t find_victim() { return 1; }
 
-// revoke access periodically
-void scan_thread() {
-  while (running) {
-    mutex_lock(&pages_mutex);
-    uint64_t now = get_timestamp();
+void handle_fault(void *addr) {
+  printf("\n--- Inside fault handler ---\n");
+  // // page-aligned virtual address
+  // uint64_t fault_vaddr = (uint64_t)(addr) & ~(PAGE_SIZE - 1);
+  // printf("Faulting address: 0x%lx\n", fault_vaddr);
 
-    for (size_t i = 0; i < NUM_PAGES; ++i) {
-      if (pages[i].in_cache) {
-        mapper_t::mprotect(pages[i].vaddr, PAGE_SIZE, PTE_NONE);
-        pages[i].last_scan = now;
-      }
-    }
+  // // map new page to resolve fault
+  // void *new_page = mmap(nullptr, PAGE_SIZE, PROT_READ | PROT_WRITE,
+  //                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  // uint64_t gpa = mapper_t::gva_to_gpa(new_page);
 
-    mutex_unlock(&pages_mutex);
-    std::this_thread::sleep_for(std::chrono::milliseconds(SCAN_INTERVAL_MS));
-  }
-}
+  // printf("Mapping 0x%lx (GVA) -> 0x%lx (GPA)\n", fault_vaddr, gpa);
+  // mapper_t::map_gpt(fault_vaddr, gpa, PAGE_SIZE, PTE_P | PTE_W);
 
-void evictor_thread() {
-  while (running) {
-    mutex_lock(&pages_mutex);
+  // --- SWAP OUT PHASE ---
+  auto victim_idx = find_victim();
+  auto victim_vaddr = pages[victim_idx].vaddr; // in the heap on the CPU node
+  printf("Swapping OUT victim: 0x%lx\n", victim_vaddr);
+  auto victim_offset = victim_vaddr - HEAP_START; // offset from heap base
+  auto swap_dst = (uintptr_t)swap_area + victim_offset;
+  memcpy((void *)swap_dst, (void *)victim_vaddr, PAGE_SIZE);
+  mapper_t::unmap(victim_vaddr, PAGE_SIZE);
 
-    uint32_t min_hotness = UINT32_MAX;
-    size_t coldest_idx = NUM_PAGES;
+  // --- SWAP IN PHASE ---
+  auto cache_offset = victim_idx * PAGE_SIZE;
+  auto cache_vaddr = (uintptr_t)cache_area + cache_offset;
+  auto cache_gpa = mapper_t::gva_to_gpa((void *)cache_vaddr);
+  auto aligned_fault_vaddr = (uintptr_t)addr & ~(PAGE_SIZE - 1);
+  printf("Swapping IN: 0x%lx (aligned: 0x%lx)\n", (uintptr_t)addr,
+         aligned_fault_vaddr);
+  // map fault address to the cache slot's physical memory
+  mapper_t::map_gpt(aligned_fault_vaddr, cache_gpa, PAGE_SIZE, PTE_P | PTE_W);
+  // copy data from swap to cache slot
+  auto fault_offset = aligned_fault_vaddr - HEAP_START;
+  auto swap_src = (uintptr_t)swap_area + fault_offset;
 
-    // find coldest page
-    for (size_t i = 0; i < NUM_PAGES; ++i) {
-      if (pages[i].in_cache && pages[i].hotness < min_hotness) {
-        min_hotness = pages[i].hotness;
-        coldest_idx = i;
-      }
-    }
+  // printf("swap_src = %p, aligned_fault_vaddr = %p\n", (void *)swap_src,
+  //        (void *)aligned_fault_vaddr);
+  // volatile uint8_t dummy = *(uint8_t *)swap_src;
 
-    if (coldest_idx != NUM_PAGES) {
-      void *phys = reinterpret_cast<void *>(mapper_t::gva_to_gpa(
-          reinterpret_cast<void *>(pages[coldest_idx].vaddr)));
-
-      memcpy((uint64_t *)swap_area + pages[coldest_idx].swap_offset, phys,
-             PAGE_SIZE);
-      mapper_t::mprotect(pages[coldest_idx].vaddr, PAGE_SIZE, PTE_NONE);
-      pages[coldest_idx].in_cache = false;
-      pages[coldest_idx].hotness = 0;
-    }
-
-    mutex_unlock(&pages_mutex);
-    std::this_thread::sleep_for(std::chrono::milliseconds(SCAN_INTERVAL_MS));
-  }
-}
-
-void handle_faults(void *args) {
-  regstate_t *state = static_cast<regstate_t *>(args);
-  uint64_t fault_addr = state->fault_addr;
-  // const uint64_t now = get_timestamp();
-  // size_t page_idx =
-  //     (mapper_t::gva_to_gpa(&fault_addr) - mapper_t::gva_to_gpa(cache_area))
-  //     / PAGE_SIZE;
-
-  mutex_lock(&pages_mutex);
-
-  // for (size_t i = 0; i < NUM_PAGES; ++i) {
-  //   if (pages[i].vaddr == fault_addr) {
-  //     if (!pages[i].in_cache) {
-  //       // swap-in
-  //       void *phys = reinterpret_cast<void *>(
-  //           mapper_t::gva_to_gpa(reinterpret_cast<void *>(fault_addr)));
-  //       memcpy(phys, (uint64_t *)swap_area + pages[i].swap_offset,
-  //       PAGE_SIZE); pages[i].in_cache = true;
-  //     }
-
-  //     if (pages[i].last_scan > 0) {
-  //       const uint64_t delta = now - pages[i].last_scan;
-  //       pages[i].hotness =
-  //           (delta > 0) ? (SCAN_INTERVAL_MS * 1000 / delta) : UINT32_MAX;
-  //     }
-
-  //     pages[i].last_access = now;
-  //     mapper_t::mprotect(fault_addr, PAGE_SIZE, PTE_P | PTE_W | PTE_U);
-  //     break;
-  //   }
-  // }
-
-  mutex_unlock(&pages_mutex);
+  memcpy((void *)aligned_fault_vaddr, (void *)swap_src, PAGE_SIZE);
 }
 
 void virtual_main(void *args) {
   UNUSED(args);
+  printf("\n--- Inside VM ---\n");
 
-  segment_t *seg = new segment_t(SWAP_SIZE, START_ADDR);
-  mapper_t::assign_handler(seg, handle_faults);
+  auto seg = new segment_t(HEAP_SIZE, HEAP_START);
+  mapper_t::assign_handler(seg, handle_fault);
 
-  std::thread scanner(scan_thread);
-  std::thread evictor(evictor_thread);
+  // trigger the handler
+  // uintptr_t *test_ptr = (uintptr_t *)(HEAP_START + 0x1000);
+  // printf("Attempting write to 0x%lx\n", (uintptr_t)test_ptr);
+  // *test_ptr = 0xDEADBEEF;
+  // printf("Write succeeded! Value: 0x%lx\n", *test_ptr);
 
-  uint8_t *data = (uint8_t *)START_ADDR;
-  for (size_t i = 0; i < SWAP_SIZE; i += PAGE_SIZE) {
-    data[i] = i % 256; // trigger page faults
-  }
+  auto page1 = (uintptr_t *)(HEAP_START + PAGE_SIZE);
+  printf("Attempting write to 0x%lx\n", (uintptr_t)page1);
+  *page1 = 0xDEADBEEF;
+  printf("Write succeeded! Value: 0x%lx\n", *page1);
 
-  scanner.join();
-  evictor.join();
+  printf("\n--- Exiting VM ---\n");
 }
 
 constexpr s_volimem_config_t voli_config{
@@ -170,26 +110,19 @@ constexpr s_volimem_config_t voli_config{
 };
 
 int main() {
-  swap_area = mmap(nullptr, SWAP_SIZE, PROT_READ | PROT_WRITE,
-                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  // pages = (Page *)HEAP_START;
+  cache_area = malloc(CACHE_SIZE);
+  swap_area = malloc(SWAP_SIZE);
 
-  cache_area = mmap(nullptr, CACHE_SIZE, PROT_READ | PROT_WRITE,
-                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-
-  pages = (Page *)calloc(NUM_PAGES, sizeof(Page));
-  for (size_t i = 0; i < NUM_PAGES; ++i) {
-    pages[i] = {.vaddr = (uint64_t)(START_ADDR + i * PAGE_SIZE),
-                .last_scan = 0,
-                .last_access = 0,
-                .in_cache = true,
-                .swap_offset = i * PAGE_SIZE,
-                .hotness = 0};
+  pages = (Page *)malloc(NUM_PAGES * sizeof(Page));
+  for (size_t i = 0; i < NUM_PAGES; i++) {
+    pages[i].vaddr = HEAP_START + i * PAGE_SIZE;
   }
+
+  printf("CACHE %p\n", cache_area);
+  printf("SWAP %p\n", swap_area);
+  printf("PAGES METADATA %p\n", (void *)pages);
 
   volimem_set_config(&voli_config);
-  volimem_start(nullptr, virtual_main);
-
-  while (true) {
-    // keep alive
-  }
+  return volimem_start(nullptr, virtual_main);
 }

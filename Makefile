@@ -21,7 +21,7 @@ CXXFLAGS += -isystem $(VOLIMEM_INC)
 LDFLAGS += -L$(VOLIMEM_LIB) -lvolimem
 
 # Build mode flags
-DEBUG_FLAGS   := -O0 -g -Wall -Wextra -Werror -Wpedantic -Wshadow -Wconversion -Wsign-conversion -fsanitize=undefined -fno-omit-frame-pointer
+DEBUG_FLAGS   := -O0 -g -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion -fsanitize=undefined -fno-omit-frame-pointer
 RELEASE_FLAGS := -O3 -march=native -funroll-loops -flto
 MODE ?= debug
 ifeq ($(MODE),release)
@@ -50,5 +50,7 @@ clean:
 run: $(TARGET)
 	LD_LIBRARY_PATH=$(VOLIMEM_LIB) ./$(TARGET)
 
-.PHONY: all clean run
+debug: $(TARGET)
+	LD_LIBRARY_PATH=$(VOLIMEM_LIB) gdb ./$(TARGET)
 
+.PHONY: all clean run debug
