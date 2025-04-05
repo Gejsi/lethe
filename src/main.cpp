@@ -59,12 +59,13 @@ void handle_fault(void *addr) {
   printf("Swapping OUT victim: 0x%lx\n", victim_vaddr);
   auto victim_offset = victim_vaddr - HEAP_START; // offset from heap base
   auto swap_dst = (uintptr_t)swap_area + victim_offset;
-  memcpy((void *)swap_dst, (void *)victim_vaddr, PAGE_SIZE);
+  auto cache_offset = victim_idx * PAGE_SIZE;
+  auto cache_vaddr = (uintptr_t)cache_area + cache_offset;
+  printf("swap_dst %p, cache_vaddr %p\n", (void *)swap_dst,
+         (void *)cache_vaddr);
   mapper_t::unmap(victim_vaddr, PAGE_SIZE);
 
   // --- SWAP IN PHASE ---
-  auto cache_offset = victim_idx * PAGE_SIZE;
-  auto cache_vaddr = (uintptr_t)cache_area + cache_offset;
   auto cache_gpa = mapper_t::gva_to_gpa((void *)cache_vaddr);
   auto aligned_fault_vaddr = (uintptr_t)addr & ~(PAGE_SIZE - 1);
   printf("Swapping IN: 0x%lx (aligned: 0x%lx)\n", (uintptr_t)addr,
@@ -84,7 +85,7 @@ void handle_fault(void *addr) {
 
 void virtual_main(void *args) {
   UNUSED(args);
-  printf("\n--- Inside VM ---\n");
+  printf("--- Inside VM ---\n\n");
 
   auto seg = new segment_t(HEAP_SIZE, HEAP_START);
   mapper_t::assign_handler(seg, handle_fault);
@@ -94,6 +95,15 @@ void virtual_main(void *args) {
   // printf("Attempting write to 0x%lx\n", (uintptr_t)test_ptr);
   // *test_ptr = 0xDEADBEEF;
   // printf("Write succeeded! Value: 0x%lx\n", *test_ptr);
+
+  for (size_t i = 0; i < 10; i++) {
+    auto vaddr = HEAP_START + i * PAGE_SIZE;
+    pages[i].vaddr = vaddr;
+    void *new_page = mmap(nullptr, PAGE_SIZE, PROT_READ | PROT_WRITE,
+                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    uint64_t gpa = mapper_t::gva_to_gpa(new_page);
+    mapper_t::map_gpt(vaddr, gpa, PAGE_SIZE, PTE_P | PTE_W);
+  }
 
   auto page1 = (uintptr_t *)(HEAP_START + PAGE_SIZE);
   printf("Attempting write to 0x%lx\n", (uintptr_t)page1);
@@ -115,9 +125,6 @@ int main() {
   swap_area = malloc(SWAP_SIZE);
 
   pages = (Page *)malloc(NUM_PAGES * sizeof(Page));
-  for (size_t i = 0; i < NUM_PAGES; i++) {
-    pages[i].vaddr = HEAP_START + i * PAGE_SIZE;
-  }
 
   printf("CACHE %p\n", cache_area);
   printf("SWAP %p\n", swap_area);
