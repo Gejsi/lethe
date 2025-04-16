@@ -1,7 +1,6 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <optional>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/mman.h>
@@ -24,8 +23,9 @@
     abort();                                                                   \
   } while (0)
 
-typedef uint8_t u8;
-typedef uintptr_t uptr;
+using u8 = uint8_t;
+using uptr = uintptr_t;
+using usize = size_t;
 
 constexpr size_t KB = 1024;
 constexpr size_t MB = KB * KB;
@@ -39,66 +39,27 @@ constexpr size_t HEAP_SIZE = SWAP_SIZE;
 
 struct Page {
   uptr vaddr;
+
+  void print() const { printf("Page { vaddr: 0x%lx }\n", vaddr); }
 };
 
 // addr_in cache = cache + gpa(vadrr) - gpa (cache)
 
 Page *pages; // page_index = (vaddr - cache_start) / page_size
-uint8_t pages_mutex;
 
 void *cache_area; // client
 void *swap_area;  // server
 
-// TODO: add fancy LRU logic
-size_t find_victim() { return 1; }
+auto allocate_page() {
+  void *new_page = mmap(nullptr, PAGE_SIZE, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  return mapper_t::gva_to_gpa(new_page);
+}
 
-// void handler() {
-//     // ...
-//     // fault_addr: faulty address & -4096;
-
-//     // suppose 1 single page in the cache_area
-//     // cache_area => virtual adress of the cache content
-//     // pages => virtual address of the cache meta data
-
-//     int victim = find_victim(); // return 0
-
-//     char* vaddr;
-//     size_t off;
-//     char* saddr;
-//     uint64_t gpa;
-//     // step 1: swap out the only page of the cache
-
-//     vaddr = pages[victim].addr; // in the heap on the CPU node
-//     voff = vaddr - START_ADDR;  // offset relative the beginning of the heap
-//     saddr = swap_area + vaff;   // address in the swap
-//     memcpy(saddr, vaddr, PAGE_SIZE);  // swap out
-
-//     mapper_t::unmap(vaddr); // unmap
-
-//     // step 2: swap in the page corresponding to fault_addr in victim
-//     // fault_addr is the accessed virtual address on the CPU node
-//     gpa = mapper_t::gva_to_gpa(cache_area + (victim << 12));
-//     mapper_t::map(fault_addr, gpa, PROT_READ | PROT_WRITE);
-
-//     voff = fault_addr - START_ADDR; // relative to beginning of the heap
-//     saddr = swap_area + voff;
-
-//     memcpy(fault_addr, swap_area, PAGE_SIZE);
-// }
+usize find_victim() { return 1; }
 
 void handle_fault(void *addr) {
   DEBUG("Inside fault handler");
-  // // page-aligned virtual address
-  // uint64_t fault_vaddr = (uint64_t)(addr) & ~(PAGE_SIZE - 1);
-  // printf("Faulting address: 0x%lx\n", fault_vaddr);
-
-  // // map new page to resolve fault
-  // void *new_page = mmap(nullptr, PAGE_SIZE, PROT_READ | PROT_WRITE,
-  //                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-  // uint64_t gpa = mapper_t::gva_to_gpa(new_page);
-
-  // printf("Mapping 0x%lx (GVA) -> 0x%lx (GPA)\n", fault_vaddr, gpa);
-  // mapper_t::map_gpt(fault_vaddr, gpa, PAGE_SIZE, PTE_P | PTE_W);
 
   // --- SWAP OUT PHASE ---
   auto victim_idx = find_victim();
@@ -106,7 +67,7 @@ void handle_fault(void *addr) {
   auto victim_offset = victim_vaddr - HEAP_START; // offset from heap base
   auto swap_dst = (uptr)swap_area + victim_offset;
   DEBUG("swap_dst %p, victim_vaddr %p", (void *)swap_dst, (void *)victim_vaddr);
-  if (victim_vaddr != 0) {
+  if (victim_vaddr) {
     INFO("Swapping OUT victim: gva = 0x%lx, gpa = 0x%lx", victim_vaddr,
          mapper_t::gva_to_gpa((void *)victim_vaddr));
     memcpy((void *)swap_dst, (void *)victim_vaddr, PAGE_SIZE);
@@ -132,12 +93,6 @@ void handle_fault(void *addr) {
   memcpy((void *)aligned_fault_vaddr, (void *)swap_src, PAGE_SIZE);
 }
 
-auto allocate_page() {
-  void *new_page = mmap(nullptr, PAGE_SIZE, PROT_READ | PROT_WRITE,
-                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-  return mapper_t::gva_to_gpa(new_page);
-}
-
 void virtual_main(void *args) {
   UNUSED(args);
   printf("--- Inside VM ---\n\n");
@@ -145,20 +100,14 @@ void virtual_main(void *args) {
   auto seg = new segment_t(HEAP_SIZE, HEAP_START);
   mapper_t::assign_handler(seg, handle_fault);
 
-  // trigger the handler
-  // uintptr_t *test_ptr = (uintptr_t *)(HEAP_START + 0x1000);
-  // printf("Attempting write to 0x%lx\n", (uintptr_t)test_ptr);
-  // *test_ptr = 0xDEADBEEF;
-  // printf("Write succeeded! Value: 0x%lx\n", *test_ptr);
-
-  for (size_t i = 0; i < 10; i++) {
-    // auto vaddr = HEAP_START + i * PAGE_SIZE;
-    pages[i].vaddr = 0;
-    // auto gpa = allocate_page();
-    // printf("Page[%zu] gva=0x%lx, gpa = 0x%lx\n", i, vaddr, gpa);
-    // mapper_t::map_gpt(vaddr, gpa, PAGE_SIZE, PTE_P | PTE_W, std::nullopt,
-    //                   false);
-  }
+  // for (size_t i = 0; i < 10; i++) {
+  // auto vaddr = HEAP_START + i * PAGE_SIZE;
+  // pages[i].vaddr = vaddr;
+  // auto gpa = allocate_page();
+  // printf("Page[%zu] gva=0x%lx, gpa = 0x%lx\n", i, vaddr, gpa);
+  // mapper_t::map_gpt(vaddr, gpa, PAGE_SIZE, PTE_P | PTE_W, std::nullopt,
+  //                   false);
+  // }
 
   printf("\n");
   {
@@ -193,10 +142,13 @@ int main() {
   cache_area = aligned_alloc(PAGE_SIZE, CACHE_SIZE);
   swap_area = aligned_alloc(PAGE_SIZE, SWAP_SIZE);
   pages = (Page *)malloc(NUM_PAGES * sizeof(Page));
+  for (size_t i = 0; i < NUM_PAGES; i++) {
+    pages[i].vaddr = 0;
+  }
 
-  printf("CACHE %p\n", cache_area);
-  printf("SWAP %p\n", swap_area);
-  printf("PAGES METADATA %p\n", (void *)pages);
+  DEBUG("CACHE %p", cache_area);
+  DEBUG("SWAP %p", swap_area);
+  DEBUG("PAGES METADATA %p", (void *)pages);
 
   constexpr s_volimem_config_t voli_config{
       .log_level = INFO,
