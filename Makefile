@@ -4,13 +4,15 @@ CXXFLAGS := -std=c++20
 SRC_DIR  := src
 OBJ_DIR  := obj
 BIN_DIR  := bin
+DEP_DIR  := $(OBJ_DIR)/.deps
 
 # Target executable name
 TARGET   := $(BIN_DIR)/main
 
 # Gather all cpp source files and corresponding object files
-SRCS     := $(wildcard $(SRC_DIR)/*.cpp)
-OBJS     := $(patsubst $(SRC_DIR)/%.cpp,$(OBJ_DIR)/%.o,$(SRCS))
+SRCS := $(wildcard $(SRC_DIR)/*.cpp)
+OBJS := $(patsubst $(SRC_DIR)/%.cpp,$(OBJ_DIR)/%.o,$(SRCS))
+DEPS := $(patsubst $(SRC_DIR)/%.cpp,$(DEP_DIR)/%.d,$(SRCS))
 
 # Paths to VoliMem
 VOLIMEM_DIR := $(HOME)/Desktop/voli
@@ -31,7 +33,10 @@ else
 endif
 
 # Create required directories if they don't exist
-$(shell mkdir -p $(OBJ_DIR) $(BIN_DIR))
+$(shell mkdir -p $(OBJ_DIR) $(BIN_DIR) $(DEP_DIR))
+
+# Include generated dependency files
+-include $(DEPS)
 
 # Default target
 all: $(TARGET)
@@ -42,7 +47,7 @@ $(TARGET): $(OBJS)
 
 # Compiling each .cpp file into an object file
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.cpp
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+	$(CXX) $(CXXFLAGS) -c $< -o $@ -MT $@ -MMD -MP -MF $(DEP_DIR)/$*.d
 
 clean:
 	rm -rf $(OBJ_DIR) $(BIN_DIR)
