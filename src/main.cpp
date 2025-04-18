@@ -39,6 +39,7 @@ void swap_out(usize victim_idx) {
     mapper_t::unmap(victim_vaddr, PAGE_SIZE);
     // ensure that unmap actually invalidates the table entry
     mapper_t::flush(victim_vaddr, PAGE_SIZE);
+    pages[victim_idx].vaddr = 0;
   }
 }
 
@@ -58,12 +59,12 @@ void swap_in(usize victim_idx, uptr fault_addr) {
   pages[victim_idx].vaddr = aligned_fault_vaddr;
 }
 
-void handle_fault(void *addr) {
-  DEBUG("Inside fault handler: %p", addr);
+void handle_fault(void *fault_addr) {
+  DEBUG("Inside fault handler: %p", fault_addr);
 
   auto victim_idx = find_victim();
   swap_out(victim_idx);
-  swap_in(victim_idx, (uptr)addr);
+  swap_in(victim_idx, (uptr)fault_addr);
 }
 
 void virtual_main(void *args) {
