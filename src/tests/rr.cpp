@@ -2,41 +2,37 @@
 #include <vector>
 
 #include "../swapper.h"
+#include "volimem/mapper.h"
 
 void test_basic_swap() {
   printf("\n--- Test: Basic Swap ---\n");
-  auto page0 = (uptr *)(HEAP_START + PAGE_SIZE * 0);
-  auto page1 = (uptr *)(HEAP_START + PAGE_SIZE * 1);
 
-  // --- Access Page 0 ---
-  printf("Attempting write to page 0 (addr: %p)...\n", (void *)page0);
-  *page0 = 0xAAAAAAAA; // Should trigger fault -> handle_fault -> swap_in
-  printf("Read back from page 0...\n");
-  ASSERT_EQ(0xAAAAAAAA, *page0, "Read back page 0 after first write");
+  auto page0 = (uptr *)(HEAP_START + PAGE_SIZE * 50);
+  auto page1 = (uptr *)(HEAP_START + PAGE_SIZE * 60);
 
-  // --- Access Page 1 ---
-  printf("\nAttempting write to page 1 (addr: %p)...\n", (void *)page1);
-  *page1 = 0xBBBBBBBB; // Should trigger fault -> handle_fault -> swap_in
-  printf("Read back from page 1...\n");
-  ASSERT_EQ(0xBBBBBBBB, *page1, "Read back page 1 after first write");
+  printf("Attempting write to 0x%lx (page mapped: %s)\n", (uptr)page0,
+         mapper_t::is_mapped(page0) ? "true" : "false");
+  *page0 = 0xDEADBEEF;
+  printf("Write succeeded: 0x%lx\n", *page0);
+  ASSERT_EQ(0xDEADBEEF, *page0, "[page0] First write-read match");
 
-  // --- Access Page 0 Again ---
-  // Assuming NUM_PAGES >= 2, page 0 should still be mapped.
-  printf("\nAttempting write to page 0 again (should be mapped)...\n");
-  *page0 = 0xCCCCCCCC;
-  printf("Read back from page 0...\n");
-  ASSERT_EQ(0xCCCCCCCC, *page0, "Read back page 0 after second write");
+  printf("Attempting write to 0x%lx (page mapped: %s)\n", (uptr)page1,
+         mapper_t::is_mapped(page1) ? "true" : "false");
+  *page1 = 0xCAFEBABE;
+  printf("Write succeeded: 0x%lx\n", *page1);
+  ASSERT_EQ(0xCAFEBABE, *page1, "[page1] First write-read match");
 
-  // --- Access Page 1 Again ---
-  printf("\nAttempting write to page 1 again (should be mapped)...\n");
-  *page1 = 0xDDDDDDDD;
-  printf("Read back from page 1...\n");
-  ASSERT_EQ(0xDDDDDDDD, *page1, "Read back page 1 after second write");
+  printf("Attempting write from 0x%lx (page mapped: %s)\n", (uptr)page0,
+         mapper_t::is_mapped(page0) ? "true" : "false");
+  printf("Read old content: 0x%lx\n", *page0);
+  *page0 = 0x777;
+  printf("Write succeeded: 0x%lx\n", *page0);
+  ASSERT_EQ(0x777, *page0, "[page0] Second write-read match");
 
-  printf("--- Test: Basic Swap PASSED ---\n");
+  printf("\n--- Test: Basic Swap PASSED ---\n");
 }
 
-// Test eviction: Access more pages than cache slots (NUM_PAGES)
+// Test eviction: Access more pages than cache slots
 void test_eviction() {
   printf("\n--- Test: Eviction (Cache Slots: %zu) ---\n", NUM_PAGES);
   // We need to access NUM_PAGES + 1 distinct pages to guarantee an eviction
@@ -54,7 +50,7 @@ void test_eviction() {
   for (usize i = 0; i < pages_to_access; ++i) {
     uptr value = 0x1000 + i;
     printf("\nWriting unique value (0x%lx) to page %zu (addr: %p)...\n", value,
-           i, pages_vec[i]);
+           i, (void *)pages_vec[i]);
     *pages_vec[i] = value;
     printf("Reading back from page %zu...\n", i);
     ASSERT_EQ(value, *pages_vec[i], "Read back page after initial write");
@@ -74,7 +70,7 @@ void test_eviction() {
   uptr expected_page0_value = 0x1000 + 0;
   printf(
       "\nAccessing page 0 (addr: %p) again. Expecting fault and swap-in...\n",
-      pages_vec[0]);
+      (void *)pages_vec[0]);
   printf("Reading value from page 0...\n");
   ASSERT_EQ(expected_page0_value, *pages_vec[0],
             "Read back page 0 after expected eviction and swap-in");
@@ -85,7 +81,7 @@ void test_eviction() {
     uptr expected_page1_value = 0x1000 + 1;
     printf(
         "\nAccessing page 1 (addr: %p) again. Expecting fault and swap-in...\n",
-        pages_vec[1]);
+        (void *)pages_vec[1]);
     printf("Reading value from page 1...\n");
     ASSERT_EQ(expected_page1_value, *pages_vec[1],
               "Read back page 1 after expected eviction and swap-in");
@@ -129,16 +125,16 @@ void test_data_integrity(usize num_distinct_pages = NUM_PAGES * 2,
 
   // Access pages pseudo-randomly many times to force swaps
   printf("Performing %zu pseudo-random accesses...\n", num_accesses);
-  srand(123); // Seed for reproducible tests
+  srand(123);
   for (usize i = 0; i < num_accesses; ++i) {
-    usize page_idx = rand() % num_distinct_pages;
+    usize page_idx = (usize)rand() % num_distinct_pages;
     // expect the initially written value
     uptr expected_value = initial_values[page_idx];
 
     if ((i % (num_accesses / 10)) == 0 || i == num_accesses - 1) {
       printf(" Access %zu/%zu: Touching page %zu (addr: %p). Expecting value "
              "0x%lx\n",
-             i + 1, num_accesses, page_idx, pages_vec[page_idx],
+             i + 1, num_accesses, page_idx, (void *)pages_vec[page_idx],
              expected_value);
     }
 

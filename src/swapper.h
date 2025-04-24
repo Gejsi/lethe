@@ -6,9 +6,11 @@
 #include <cstdlib>
 
 #define UNUSED(x) (void)(x)
+
 #define DEBUG(fmt, ...) printf("[DEBUG] " fmt "\n", ##__VA_ARGS__)
-#define WARN(fmt, ...) printf("[WARNING] " fmt "\n", ##__VA_ARGS__)
+#define WARN(fmt, ...) printf("[WARN] " fmt "\n", ##__VA_ARGS__)
 #define INFO(fmt, ...) printf("[INFO] " fmt "\n", ##__VA_ARGS__)
+
 #define PANIC(fmt, ...)                                                        \
   do {                                                                         \
     fprintf(stderr, "\x1b[31m[PANIC] %s:%d (%s): " fmt "\x1b[0m\n", __FILE__,  \
@@ -39,12 +41,59 @@ constexpr usize GB = MB * KB;
 constexpr usize PAGE_SIZE = 4 * KB;
 constexpr usize CACHE_SIZE = 128 * MB;
 // constexpr usize NUM_PAGES = CACHE_SIZE / PAGE_SIZE;
-constexpr usize NUM_PAGES = 2;
+constexpr usize NUM_PAGES = 1;
 constexpr usize SWAP_SIZE = 1 * GB;
 constexpr usize HEAP_SIZE = SWAP_SIZE;
 constexpr uptr HEAP_START = 0xffff800000000000;
 
-const auto COLD_THRESHOLD = std::chrono::milliseconds(500);
+constexpr auto COLD_THRESHOLD = std::chrono::milliseconds(500);
+
+enum class PageState {
+  // slot is empty
+  Free,
+  // slot holds an accessible page
+  Mapped,
+  // slot holds an inaccessible page
+  Probed
+};
+
+constexpr const char *page_state_to_str(PageState state) {
+  switch (state) {
+  case PageState::Free:
+    return "Free";
+  case PageState::Mapped:
+    return "Mapped";
+  case PageState::Probed:
+    return "Probed";
+  default:
+    return "Unknown";
+  }
+}
+
+constexpr const char *bool_to_str(bool b) { return b ? "true" : "false"; }
+
+struct Page {
+  // Maps a virtual page from the heap to a cache slot
+  uptr vaddr;
+  PageState state;
+  std::chrono::steady_clock::time_point last_scan;
+  std::chrono::steady_clock::time_point last_fault;
+
+  Page() : vaddr(0), state(PageState::Free), last_scan(), last_fault() {}
+
+  void print() const {
+    auto scan_since = std::chrono::duration_cast<std::chrono::seconds>(
+                          last_scan.time_since_epoch())
+                          .count();
+    auto fault_since = std::chrono::duration_cast<std::chrono::seconds>(
+                           last_fault.time_since_epoch())
+                           .count();
+
+    printf("Page {\n  vaddr: 0x%lx,\n  state: %s,\n  last_scan: %ld s,\n  "
+           "last_fault: %ld s\n}\n",
+           vaddr, page_state_to_str(state), scan_since, fault_since);
+  }
+};
 
 class Swapper {
 public:
@@ -54,11 +103,4 @@ public:
 
 protected:
   Swapper() = default; // prevent direct instantiation
-};
-
-struct Page {
-  // In the heap on the CPU node
-  uptr vaddr;
-
-  void print() const { printf("Page { vaddr: 0x%lx }\n", vaddr); }
 };
