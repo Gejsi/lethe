@@ -48,7 +48,7 @@ constexpr uptr HEAP_START = 0xffff800000000000;
 
 constexpr auto COLD_THRESHOLD = std::chrono::milliseconds(500);
 
-enum class PageState {
+enum class PageState : u8 {
   // slot is empty
   Free,
   // slot holds an accessible page
@@ -75,23 +75,23 @@ constexpr const char *bool_to_str(bool b) { return b ? "true" : "false"; }
 struct Page {
   // Maps a virtual page from the heap to a cache slot
   uptr vaddr;
-  PageState state;
   std::chrono::steady_clock::time_point last_scan;
-  std::chrono::steady_clock::time_point last_fault;
+  PageState state;
 
-  Page() : vaddr(0), state(PageState::Free), last_scan(), last_fault() {}
+  Page() : vaddr(0), state(PageState::Free), last_scan() {}
 
   void print() const {
-    auto scan_since = std::chrono::duration_cast<std::chrono::seconds>(
-                          last_scan.time_since_epoch())
-                          .count();
-    auto fault_since = std::chrono::duration_cast<std::chrono::seconds>(
-                           last_fault.time_since_epoch())
-                           .count();
+    auto scan_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                       last_scan.time_since_epoch())
+                       .count();
 
-    printf("Page {\n  vaddr: 0x%lx,\n  state: %s,\n  last_scan: %ld s,\n  "
-           "last_fault: %ld s\n}\n",
-           vaddr, page_state_to_str(state), scan_since, fault_since);
+    // auto cit = std::chrono::duration_cast<std::chrono::milliseconds>(
+    //                last_fault - last_scan)
+    //                .count();
+
+    printf("Page {\n  vaddr: 0x%lx,\n  state: %s,\n  last_scan:  %ld ms,\n  "
+           "last_fault: %ld ms,\n  cit: %ld\n}\n",
+           vaddr, page_state_to_str(state), scan_ms, 0, 0);
   }
 };
 

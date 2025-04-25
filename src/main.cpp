@@ -43,12 +43,7 @@ void *swap_area;  // server
 //             DEBUG("Probing cache slot %zu (VAddr 0x%lx)", cache_idx,
 //             target_vaddr);
 
-//             // Mark as inaccessible - USING UNMAP for consistency with
-//             swap_out
-//             // If VoliMem had protect(PROT_NONE), it might be better.
-//             mapper_t::unmap(target_vaddr, PAGE_SIZE);
-//             mapper_t::flush(target_vaddr, PAGE_SIZE); // Essential after
-//             unmap/permission change
+//             set_permissions(PTE_NONE);
 
 //             // Update metadata
 //             pages[cache_idx].is_probed = true;
@@ -131,11 +126,6 @@ void swap_out(uptr victim_vaddr, uptr swap_dst) {
   mapper_t::flush(victim_vaddr, PAGE_SIZE);
 }
 
-void swap_in(uptr target_vaddr, uptr swap_src, uptr cache_gpa) {
-  mapper_t::map_gpt(target_vaddr, cache_gpa, PAGE_SIZE, PTE_P | PTE_W);
-  memcpy((void *)target_vaddr, (void *)swap_src, PAGE_SIZE);
-}
-
 void swap_out_page(usize victim_idx) {
   // victim page is the i-th page within the heap
   auto &victim_page = pages[victim_idx];
@@ -146,16 +136,27 @@ void swap_out_page(usize victim_idx) {
          victim_vaddr, mapper_t::gva_to_gpa((void *)victim_vaddr),
          page_state_to_str(victim_page.state));
 
+    if (victim_page.state == PageState::Probed) {
+      DEBUG("Restoring access permissions before swappping out 0x%lx",
+            victim_vaddr);
+      set_permissions(victim_vaddr, PTE_P | PTE_W | PTE_U);
+    }
+
     auto victim_offset = victim_vaddr - HEAP_START;
     auto swap_dst = (uptr)swap_area + victim_offset;
-
+    // copy data from cache slot to swap
     swap_out(victim_vaddr, swap_dst);
 
     victim_page.vaddr = 0;
     victim_page.state = PageState::Free;
-    victim_page.last_fault = {};
+    // victim_page.last_fault = {};
     victim_page.last_scan = {};
   }
+}
+
+void swap_in(uptr target_vaddr, uptr swap_src, uptr cache_gpa) {
+  mapper_t::map_gpt(target_vaddr, cache_gpa, PAGE_SIZE, PTE_P | PTE_W);
+  memcpy((void *)target_vaddr, (void *)swap_src, PAGE_SIZE);
 }
 
 void swap_in_page(usize target_idx, uptr fault_addr) {
@@ -168,16 +169,13 @@ void swap_in_page(usize target_idx, uptr fault_addr) {
 
   auto fault_offset = aligned_fault_vaddr - HEAP_START;
   auto swap_src = (uptr)swap_area + fault_offset;
-
   // copy data from swap to cache slot
-  // swap_in(aligned_fault_vaddr, swap_src, cache_gpa);
-  mapper_t::map_gpt(aligned_fault_vaddr, cache_gpa, PAGE_SIZE, PTE_P | PTE_W);
-  memcpy((void *)cache_slot, (void *)swap_src, PAGE_SIZE);
+  swap_in(aligned_fault_vaddr, swap_src, cache_gpa);
 
   auto &target_page = pages[target_idx];
   target_page.vaddr = aligned_fault_vaddr;
   target_page.state = PageState::Mapped;
-  target_page.last_fault = std::chrono::steady_clock::now();
+  // target_page.last_fault = std::chrono::steady_clock::now();
   target_page.last_scan = {};
 }
 
@@ -193,7 +191,7 @@ void handle_fault(void *fault_addr) {
     set_permissions(aligned_fault_vaddr, PTE_P | PTE_W | PTE_U);
 
     pages[probed_idx].state = PageState::Mapped;
-    pages[probed_idx].last_fault = std::chrono::steady_clock::now();
+    // pages[probed_idx].last_fault = std::chrono::steady_clock::now();
   } else {
     auto victim_idx = find_victim_rr();
     swap_out_page(victim_idx);
@@ -216,6 +214,9 @@ void virtual_main(void *args) {
   //   mapper_t::map_gpt(vaddr, gpa, PAGE_SIZE, PTE_P | PTE_W);
   // }
 
+  INFO("------------------------------------");
+  print_pages();
+  INFO("------------------------------------");
   printf("[Test 1] Write to Page 50 (Should FAULT IN)\n");
   {
     auto page = (uptr *)(HEAP_START + PAGE_SIZE * 50);
@@ -225,9 +226,15 @@ void virtual_main(void *args) {
     *page = 0xDEADBEEF;
     printf("Write succeeded: 0x%lx\n", *page);
   }
+  INFO("------------------------------------");
+  print_pages();
+  INFO("------------------------------------");
 
   printf("\n[Test 1.5] Manually marking\n");
   mark();
+  INFO("------------------------------------");
+  print_pages();
+  INFO("------------------------------------");
 
   printf("\n[Test 2] Write to Page 60 (Should FAULT IN)\n");
   {
@@ -238,15 +245,21 @@ void virtual_main(void *args) {
     *page = 0xCAFEBABE;
     printf("Write succeeded: 0x%lx\n", *page);
   }
+  INFO("------------------------------------");
+  print_pages();
+  INFO("------------------------------------");
 
-  // printf("\n[Test 3] Read from Page 50 (Should SUCCEED)\n");
-  // {
-  //   auto page = (uptr *)(HEAP_START + PAGE_SIZE * 50);
-  //   printf("Attempting access to %p (state: %s) (voli-mapped: %s)\n",
-  //          (void *)page, page_state_to_str(pages[0].state),
-  //          bool_to_str(mapper_t::is_mapped(page)));
-  //   printf("Read succeeded: 0x%lx\n", *page);
-  // }
+  printf("\n[Test 3] Read from Page 50 (Should SUCCEED)\n");
+  {
+    auto page = (uptr *)(HEAP_START + PAGE_SIZE * 50);
+    printf("Attempting access to %p (state: %s) (voli-mapped: %s)\n",
+           (void *)page, page_state_to_str(pages[0].state),
+           bool_to_str(mapper_t::is_mapped(page)));
+    printf("Read succeeded: 0x%lx\n", *page);
+  }
+  INFO("------------------------------------");
+  print_pages();
+  INFO("------------------------------------");
 
   printf("\n--- Exiting VM ---\n");
 }
