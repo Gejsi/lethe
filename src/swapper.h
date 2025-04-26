@@ -34,6 +34,10 @@ using u8 = uint8_t;
 using uptr = uintptr_t;
 using usize = size_t;
 
+using Clock = std::chrono::steady_clock;
+using TimePoint = Clock::time_point;
+using Milliseconds = std::chrono::milliseconds;
+
 constexpr usize KB = 1024;
 constexpr usize MB = KB * KB;
 constexpr usize GB = MB * KB;
@@ -75,23 +79,24 @@ constexpr const char *bool_to_str(bool b) { return b ? "true" : "false"; }
 struct Page {
   // Maps a virtual page from the heap to a cache slot
   uptr vaddr;
-  std::chrono::steady_clock::time_point last_scan;
+  TimePoint last_scan;
+  Milliseconds cit;
   PageState state;
 
-  Page() : vaddr(0), state(PageState::Free), last_scan() {}
+  Page() : vaddr(0), last_scan(), cit(), state(PageState::Free) {}
 
   void print() const {
-    auto scan_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                       last_scan.time_since_epoch())
-                       .count();
+    auto scan_ms =
+        std::chrono::duration_cast<Milliseconds>(last_scan.time_since_epoch())
+            .count();
 
     // auto cit = std::chrono::duration_cast<std::chrono::milliseconds>(
     //                last_fault - last_scan)
     //                .count();
 
-    printf("Page {\n  vaddr: 0x%lx,\n  state: %s,\n  last_scan:  %ld ms,\n  "
-           "last_fault: %ld ms,\n  cit: %ld\n}\n",
-           vaddr, page_state_to_str(state), scan_ms, 0, 0);
+    printf("Page {\n  vaddr: 0x%lx,\n  state: %s,\n  last_scan: %ld ms,\n"
+           "  cit: %ld ms\n}\n",
+           vaddr, page_state_to_str(state), scan_ms, cit.count());
   }
 };
 
