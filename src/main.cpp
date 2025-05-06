@@ -1,3 +1,4 @@
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -7,12 +8,14 @@
 
 #include "swapper.h"
 #include "tests/rr.cpp"
+#include "volimem/exception.h"
 #include "volimem/mapper.h"
 #include "volimem/volimem.h"
 
 Page *pages;
 void *cache_area; // client
 void *swap_area;  // server
+usize free_pages_count = 0;
 // std::unique_ptr<Swapper> swapper;
 
 /**
@@ -62,60 +65,124 @@ auto allocate_page() {
   return mapper_t::gva_to_gpa(new_page);
 }
 
+void trigger_write(usize page_idx, uptr value) {
+  uptr vaddr = HEAP_START + PAGE_SIZE * page_idx;
+  auto ptr = (uptr *)vaddr;
+
+  printf("\nWrite to Page %zu\n", page_idx);
+  printf("Attempting write access to %p (mapped: %s)\n", (void *)ptr,
+         bool_to_str(mapper_t::is_mapped(ptr)));
+
+  *ptr = value;
+  printf("Write succeeded: 0x%lx\n", *ptr);
+}
+
+void trigger_read(usize page_idx) {
+  uptr vaddr = HEAP_START + PAGE_SIZE * page_idx;
+  auto ptr = (uptr *)vaddr;
+
+  printf("\nRead from Page %zu\n", page_idx);
+  printf("Attempting read access to %p (mapped: %s)\n", (void *)ptr,
+         bool_to_str(mapper_t::is_mapped(ptr)));
+  printf("Read succeeded: 0x%lx\n", *ptr);
+}
+
 void print_pages() {
   for (auto &page : std::span(pages, NUM_PAGES)) {
     page.print();
   }
 }
 
-usize find_victim_rr() {
+usize find_rr_page() {
   static usize next_idx = 0;
   usize idx = next_idx;
   next_idx = (next_idx + 1) % NUM_PAGES;
-  DEBUG("Filling cache slot %zu", idx);
+  DEBUG("Round-robin cache slot selected: %zu", idx);
   return idx;
 }
 
-int is_page_probed(uptr target_vaddr) {
+std::optional<usize> find_free_page() {
   for (usize i = 0; i < NUM_PAGES; i++) {
-    if (pages[i].vaddr == target_vaddr && pages[i].state == PageState::Probed) {
-      return (int)i;
+    if (pages[i].state == PageState::Free) {
+      DEBUG("Free cache slot selected: %zu", i);
+      return i;
     }
   }
-  return -1;
+
+  DEBUG("No free cache slots available");
+  return std::nullopt;
 }
 
-void set_permissions(uptr vaddr, uptr flags) {
+usize find_lru_page() {
+  usize idx = find_rr_page();
+  TimePoint oldest_time = Clock::now();
+  bool found = false; // track if we found at least one mapped page
+
+  for (usize i = 0; i < NUM_PAGES; i++) {
+    if (pages[i].state != PageState::Free) {
+      if (!found || pages[i].last_fault < oldest_time) {
+        oldest_time = pages[i].last_fault;
+        idx = i;
+        found = true;
+      }
+    }
+  }
+
+  // if the cache is full, we must have found at least one candidate
+  syscheck(found && "LRU didn't find any mapped pages");
+
+  DEBUG("LRU cache slot selected: %zu", idx);
+  return idx;
+}
+
+std::optional<usize> is_page_probed(uptr target_vaddr) {
+  for (usize i = 0; i < NUM_PAGES; i++) {
+    if (pages[i].vaddr == target_vaddr && pages[i].state == PageState::Probed) {
+      return i;
+    }
+  }
+
+  return std::nullopt;
+}
+
+void set_permissions(uptr vaddr, uptr flags, bool flush = true) {
   mapper_t::mprotect(vaddr, PAGE_SIZE, flags);
-  mapper_t::flush(vaddr, PAGE_SIZE);
+  if (flush) {
+    mapper_t::flush(vaddr, PAGE_SIZE);
+  }
 }
 
 void mark() {
-  auto now = std::chrono::steady_clock::now();
-  usize new_probed_count = 0;
-  usize old_probed_count = 0;
-  usize free_count = 0;
+  usize new_probed_stat = 0;
+  usize old_probed_stat = 0;
+  usize free_stat = 0;
 
   for (auto &page : std::span(pages, NUM_PAGES)) {
     switch (page.state) {
     case PageState::Mapped:
       // update protection level to cause a fault in case of read/write
-      set_permissions(page.vaddr, PTE_NONE);
-      page.last_scan = now;
+      set_permissions(page.vaddr, PTE_NONE, false);
+      page.last_scan = Clock::now();
       page.state = PageState::Probed;
-      new_probed_count++;
+      new_probed_stat++;
       break;
     case PageState::Probed:
-      old_probed_count++;
+      old_probed_stat++;
       break;
     case PageState::Free:
-      free_count++;
+      free_stat++;
       break;
     }
   }
 
+  // flush all instead of flushing individual pages
+  // when setting permissions, because it's more efficient
+  if (new_probed_stat > 0) {
+    mapper_t::flush_all();
+  }
+
   DEBUG("Marked pages: newly probed=%zu, already probed=%zu, free=%zu",
-        new_probed_count, old_probed_count, free_count);
+        new_probed_stat, old_probed_stat, free_stat);
 }
 
 void swap_out(uptr victim_vaddr, uptr swap_dst) {
@@ -131,9 +198,8 @@ void swap_out_page(usize victim_idx) {
   // victim page is the i-th page within the heap
   auto &victim_page = pages[victim_idx];
 
-  if (victim_page.state == PageState::Free) {
-    return;
-  }
+  syscheck((victim_page.state != PageState::Free) &&
+           "Swap-out shouldn't be called for a free page.");
 
   auto victim_vaddr = victim_page.vaddr;
   INFO("Swapping OUT victim: gva = 0x%lx, gpa = 0x%lx, state = %s",
@@ -153,6 +219,7 @@ void swap_out_page(usize victim_idx) {
 
   victim_page.vaddr = 0;
   victim_page.state = PageState::Free;
+  victim_page.last_fault = {};
   victim_page.last_scan = {};
   victim_page.cit = {};
 }
@@ -162,48 +229,51 @@ void swap_in(uptr target_vaddr, uptr swap_src, uptr cache_gpa) {
   memcpy((void *)target_vaddr, (void *)swap_src, PAGE_SIZE);
 }
 
-void swap_in_page(usize target_idx, uptr fault_addr) {
-  auto aligned_fault_vaddr = fault_addr & ~(PAGE_SIZE - 1);
+void swap_in_page(usize target_idx, uptr aligned_fault_vaddr) {
   auto cache_offset = target_idx * PAGE_SIZE;
   auto cache_slot = (uptr)cache_area + cache_offset;
   auto cache_gpa = mapper_t::gva_to_gpa((void *)cache_slot);
-  INFO("Swapping IN: 0x%lx (aligned: 0x%lx), cache_gpa 0x%lx", fault_addr,
-       aligned_fault_vaddr, cache_gpa);
+  INFO("Swapping IN: 0x%lx, cache_gpa 0x%lx", aligned_fault_vaddr, cache_gpa);
 
-  auto fault_offset = aligned_fault_vaddr - HEAP_START;
-  auto swap_src = (uptr)swap_area + fault_offset;
+  auto target_offset = aligned_fault_vaddr - HEAP_START;
+  auto swap_src = (uptr)swap_area + target_offset;
   // copy data from swap to cache slot
   swap_in(aligned_fault_vaddr, swap_src, cache_gpa);
 
   auto &target_page = pages[target_idx];
   target_page.vaddr = aligned_fault_vaddr;
   target_page.state = PageState::Mapped;
+  target_page.last_fault = Clock::now();
   target_page.last_scan = {};
   target_page.cit = {};
 }
 
 void handle_fault(void *fault_addr) {
   DEBUG("Inside fault handler: %p", fault_addr);
-
   auto aligned_fault_vaddr = (uptr)fault_addr & ~(PAGE_SIZE - 1);
-  auto probed_idx = is_page_probed(aligned_fault_vaddr);
 
-  if (probed_idx != -1) {
+  // TODO: create a map<vaddr, idx> to more efficiently check?
+  if (auto probed_idx = is_page_probed(aligned_fault_vaddr)) {
     DEBUG("Restoring access permissions for 0x%lx", aligned_fault_vaddr);
     set_permissions(aligned_fault_vaddr, PTE_P | PTE_W | PTE_U);
 
-    auto last_scan = pages[probed_idx].last_scan;
-    Milliseconds cit = (last_scan == TimePoint{})
-                           ? Milliseconds{}
-                           : std::chrono::duration_cast<Milliseconds>(
-                                 Clock::now() - last_scan);
+    auto &probed_page = pages[*probed_idx];
+    probed_page.state = PageState::Mapped;
+    probed_page.last_fault = Clock::now();
+    probed_page.cit = (probed_page.last_scan == TimePoint{})
+                          ? Milliseconds{}
+                          : std::chrono::duration_cast<Milliseconds>(
+                                Clock::now() - probed_page.last_scan);
 
-    pages[probed_idx].state = PageState::Mapped;
-    pages[probed_idx].cit = cit;
+    return;
+  }
+
+  if (auto free_idx = find_free_page()) {
+    swap_in_page(*free_idx, aligned_fault_vaddr);
   } else {
-    auto victim_idx = find_victim_rr();
-    swap_out_page(victim_idx);
-    swap_in_page(victim_idx, (uptr)fault_addr);
+    auto lru_idx = find_lru_page();
+    swap_out_page(lru_idx);
+    swap_in_page(lru_idx, aligned_fault_vaddr);
   }
 }
 
@@ -217,67 +287,22 @@ void virtual_main(void *args) {
   // for (size_t i = 0; i < NUM_PAGES; i++) {
   //   auto vaddr = HEAP_START + i * PAGE_SIZE;
   //   pages[i].vaddr = vaddr;
+  //   pages[i].state = PageState::Mapped;
   //   auto gpa = allocate_page();
-  //   printf("Page[%zu] gva=0x%lx, gpa = 0x%lx\n", i, vaddr, gpa);
   //   mapper_t::map_gpt(vaddr, gpa, PAGE_SIZE, PTE_P | PTE_W);
   // }
-
-  // printf("[Test 1] Write to Page 50 (Should FAULT IN)\n");
-  // {
-  //   auto page = (uptr *)(HEAP_START + PAGE_SIZE * 50);
-  //   printf("Attempting access to %p (state: %s) (voli-mapped: %s)\n",
-  //          (void *)page, page_state_to_str(pages[0].state),
-  //          bool_to_str(mapper_t::is_mapped(page)));
-  //   *page = 0xDEADBEEF;
-  //   printf("Write succeeded: 0x%lx\n", *page);
-  // }
-
-  // printf("\n[Test 1.5] Manually marking\n");
-  // mark();
-
-  // printf("\n[Test 2] Write to Page 60 (Should FAULT IN)\n");
-  // {
-  //   auto page = (uptr *)(HEAP_START + PAGE_SIZE * 60);
-  //   printf("Attempting access to %p (state: %s) (voli-mapped: %s)\n",
-  //          (void *)page, page_state_to_str(pages[0].state),
-  //          bool_to_str(mapper_t::is_mapped(page)));
-  //   *page = 0xCAFEBABE;
-  //   printf("Write succeeded: 0x%lx\n", *page);
-  // }
-
-  // printf("\n[Test 3] Read from Page 50 (Should SUCCEED)\n");
-  // {
-  //   auto page = (uptr *)(HEAP_START + PAGE_SIZE * 50);
-  //   printf("Attempting access to %p (state: %s) (voli-mapped: %s)\n",
-  //          (void *)page, page_state_to_str(pages[0].state),
-  //          bool_to_str(mapper_t::is_mapped(page)));
-  //   printf("Read succeeded: 0x%lx\n", *page);
-  // }
-
-  printf("[Test 1] Write to Page 50 (Should FAULT IN)\n");
-  {
-    auto page = (uptr *)(HEAP_START + PAGE_SIZE * 50);
-    printf("Attempting access to %p (state: %s) (voli-mapped: %s)\n",
-           (void *)page, page_state_to_str(pages[0].state),
-           bool_to_str(mapper_t::is_mapped(page)));
-    *page = 0xDEADBEEF;
-    printf("Write succeeded: 0x%lx\n", *page);
+  for (usize i = 0; i < NUM_PAGES; i++) {
+    auto vaddr = HEAP_START + i * PAGE_SIZE;
+    u8 tmp = *((u8 *)vaddr);
+    UNUSED(tmp);
   }
 
-  printf("\n[Test 1.5] Manually marking\n");
-  mark();
+  print_pages();
+  trigger_write(60, 0xDEADBEEF);
   print_pages();
 
-  sleep(1);
-
-  printf("\n[Test 2] Read from Page 50 (Should SUCCEED)\n");
-  {
-    auto page = (uptr *)(HEAP_START + PAGE_SIZE * 50);
-    printf("Attempting access to %p (state: %s) (voli-mapped: %s)\n",
-           (void *)page, page_state_to_str(pages[0].state),
-           bool_to_str(mapper_t::is_mapped(page)));
-    printf("Read succeeded: 0x%lx\n", *page);
-  }
+  mark();
+  trigger_read(0);
   print_pages();
 
   printf("\n--- Exiting VM ---\n");

@@ -117,14 +117,14 @@ void test_data_integrity(usize num_distinct_pages = NUM_PAGES * 2,
   for (usize i = 0; i < num_distinct_pages; ++i) {
     // printf("Initial write to page %zu (addr: %p)...\n", i, pages_vec[i]);
     *pages_vec[i] = initial_values[i];
-    // Read back immediately to confirm write worked (might involve fault)
+    // Read back immediately to confirm write worked
     ASSERT_EQ(initial_values[i], *pages_vec[i],
               "Read back after initial write");
   }
   printf("Initial writes completed.\n");
 
-  // Access pages pseudo-randomly many times to force swaps
-  printf("Performing %zu pseudo-random accesses...\n", num_accesses);
+  // Access pages randomly many times to force swaps
+  printf("Performing %zu random accesses...\n", num_accesses);
   srand(123);
   for (usize i = 0; i < num_accesses; ++i) {
     usize page_idx = (usize)rand() % num_distinct_pages;
