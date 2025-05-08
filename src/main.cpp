@@ -4,6 +4,7 @@
 #include <cstring>
 #include <span>
 #include <sys/mman.h>
+#include <thread>
 #include <unistd.h>
 
 #include "swapper.h"
@@ -65,6 +66,10 @@ auto allocate_page() {
   return mapper_t::gva_to_gpa(new_page);
 }
 
+inline void sleep_ms(usize ms) {
+  std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+}
+
 void trigger_write(usize page_idx, uptr value) {
   uptr vaddr = HEAP_START + PAGE_SIZE * page_idx;
   auto ptr = (uptr *)vaddr;
@@ -114,16 +119,17 @@ std::optional<usize> find_free_page() {
 }
 
 usize find_lru_page() {
-  usize idx = find_rr_page();
-  TimePoint oldest_time = Clock::now();
+  usize idx = 0;
+  TimePoint oldest = TimePoint::max();
   bool found = false; // track if we found at least one mapped page
 
   for (usize i = 0; i < NUM_PAGES; i++) {
     if (pages[i].state != PageState::Free) {
-      if (!found || pages[i].last_fault < oldest_time) {
-        oldest_time = pages[i].last_fault;
+      found = true;
+
+      if (pages[i].last_fault < oldest) {
+        oldest = pages[i].last_fault;
         idx = i;
-        found = true;
       }
     }
   }
@@ -152,10 +158,14 @@ void set_permissions(uptr vaddr, uptr flags, bool flush = true) {
   }
 }
 
+//
 void mark() {
   usize new_probed_stat = 0;
   usize old_probed_stat = 0;
   usize free_stat = 0;
+
+  // mapper_t::is_dirty_range(uint64_t gva_start, uint64_t gva_end, vector_t
+  // &result);
 
   for (auto &page : std::span(pages, NUM_PAGES)) {
     switch (page.state) {
@@ -268,6 +278,7 @@ void handle_fault(void *fault_addr) {
     return;
   }
 
+  // TODO: add queue of free pages?
   if (auto free_idx = find_free_page()) {
     swap_in_page(*free_idx, aligned_fault_vaddr);
   } else {
@@ -293,16 +304,17 @@ void virtual_main(void *args) {
   // }
   for (usize i = 0; i < NUM_PAGES; i++) {
     auto vaddr = HEAP_START + i * PAGE_SIZE;
-    u8 tmp = *((u8 *)vaddr);
+    u8 tmp = *((u8 *)vaddr); // read to trigger a fault
     UNUSED(tmp);
   }
 
-  print_pages();
-  trigger_write(60, 0xDEADBEEF);
-  print_pages();
+  auto now = Clock::now();
+  pages[0].last_fault = now - std::chrono::milliseconds(1000);
+  pages[1].last_fault = now - std::chrono::milliseconds(600);
+  pages[2].last_fault = now - std::chrono::milliseconds(400);
 
-  mark();
-  trigger_read(0);
+  print_pages();
+  trigger_read(60);
   print_pages();
 
   printf("\n--- Exiting VM ---\n");
