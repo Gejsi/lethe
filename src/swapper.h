@@ -5,6 +5,8 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include "volimem/mapper.h"
+
 #define UNUSED(x) (void)(x)
 
 // ANSI color codes
@@ -29,6 +31,18 @@
     fprintf(stderr, CLR_PANIC "[PANIC] %s:%d (%s): " fmt CLR_RESET "\n",       \
             __FILE__, __LINE__, __func__, ##__VA_ARGS__);                      \
     abort();                                                                   \
+  } while (0)
+
+// basically `assert` but doesn't flood
+// with register errors when called within a volimem fault handler
+#define ENSURE(cond, msg)                                                      \
+  do {                                                                         \
+    if (!(cond)) {                                                             \
+      snprintf(__VOLIMEM_ERROR_BUF, BUFSIZ,                                    \
+               CLR_ERROR "Assertion failed in %s (%s:%u): %s" CLR_RESET "\n",  \
+               __FILE__, __func__, __LINE__, msg);                             \
+      zthrow(__VOLIMEM_ERROR_BUF);                                             \
+    }                                                                          \
   } while (0)
 
 #define ASSERT_EQ(val1, val2, msg)                                             \
@@ -59,7 +73,7 @@ constexpr usize GB = MB * KB;
 constexpr usize PAGE_SIZE = 4 * KB;
 constexpr usize CACHE_SIZE = 128 * MB;
 // constexpr usize NUM_PAGES = CACHE_SIZE / PAGE_SIZE;
-constexpr usize NUM_PAGES = 3;
+constexpr usize NUM_PAGES = 2;
 constexpr usize SWAP_SIZE = 1 * GB;
 constexpr usize HEAP_SIZE = SWAP_SIZE;
 constexpr uptr HEAP_START = 0xffff800000000000;

@@ -9,7 +9,6 @@
 
 #include "swapper.h"
 #include "tests/rr.cpp"
-#include "volimem/exception.h"
 #include "volimem/mapper.h"
 #include "volimem/volimem.h"
 
@@ -135,7 +134,7 @@ usize find_lru_page() {
   }
 
   // if the cache is full, we must have found at least one candidate
-  syscheck(found && "LRU didn't find any mapped pages");
+  ENSURE(found, "LRU didn't find any mapped pages");
 
   DEBUG("LRU cache slot selected: %zu", idx);
   return idx;
@@ -151,6 +150,11 @@ std::optional<usize> is_page_probed(uptr target_vaddr) {
   return std::nullopt;
 }
 
+inline bool pte_is_present(uptr pte) { return pte & PTE_P; }
+inline bool pte_is_writable(uptr pte) { return pte & PTE_W; }
+inline bool pte_is_accessed(uptr pte) { return pte & PTE_A; }
+inline bool pte_is_dirty(uptr pte) { return pte & PTE_D; }
+
 void set_permissions(uptr vaddr, uptr flags, bool flush = true) {
   mapper_t::mprotect(vaddr, PAGE_SIZE, flags);
   if (flush) {
@@ -158,14 +162,10 @@ void set_permissions(uptr vaddr, uptr flags, bool flush = true) {
   }
 }
 
-//
 void mark() {
   usize new_probed_stat = 0;
   usize old_probed_stat = 0;
   usize free_stat = 0;
-
-  // mapper_t::is_dirty_range(uint64_t gva_start, uint64_t gva_end, vector_t
-  // &result);
 
   for (auto &page : std::span(pages, NUM_PAGES)) {
     switch (page.state) {
@@ -208,8 +208,8 @@ void swap_out_page(usize victim_idx) {
   // victim page is the i-th page within the heap
   auto &victim_page = pages[victim_idx];
 
-  syscheck((victim_page.state != PageState::Free) &&
-           "Swap-out shouldn't be called for a free page.");
+  ENSURE(victim_page.state != PageState::Free,
+         "Swap-out shouldn't be called for a free page.");
 
   auto victim_vaddr = victim_page.vaddr;
   INFO("Swapping OUT victim: gva = 0x%lx, gpa = 0x%lx, state = %s",
@@ -308,14 +308,33 @@ void virtual_main(void *args) {
     UNUSED(tmp);
   }
 
-  auto now = Clock::now();
-  pages[0].last_fault = now - std::chrono::milliseconds(1000);
-  pages[1].last_fault = now - std::chrono::milliseconds(600);
-  pages[2].last_fault = now - std::chrono::milliseconds(400);
+  auto v = HEAP_START + 0 * PAGE_SIZE;
+  auto pte = mapper_t::get_protect(v);
+  DEBUG("ALL %lu", pte);
+  DEBUG("PTE_P %s", bool_to_str(pte_is_present(pte)));
+  DEBUG("PTE_W %s", bool_to_str(pte_is_writable(pte)));
+  DEBUG("PTE_A %s", bool_to_str(pte_is_accessed(pte)));
+  DEBUG("PTE_D %s", bool_to_str(pte_is_dirty(pte)));
+  set_permissions(v, pte & ~(uptr)(PTE_A | PTE_D));
+  pte = mapper_t::get_protect(v);
+  DEBUG("ALL %lu", pte);
+  DEBUG("PTE_P %s", bool_to_str(pte_is_present(pte)));
+  DEBUG("PTE_W %s", bool_to_str(pte_is_writable(pte)));
+  DEBUG("PTE_A %s", bool_to_str(pte_is_accessed(pte)));
+  DEBUG("PTE_D %s", bool_to_str(pte_is_dirty(pte)));
+  trigger_write(0, 0xdead);
 
-  print_pages();
-  trigger_read(60);
-  print_pages();
+  // this successfully swaps the 2nd (1-index) page
+  // even though the the 1st one is initially set with an older
+  // fault time because it's accessed after a mark phase.
+  // auto now = Clock::now();
+  // pages[0].last_fault = now - std::chrono::milliseconds(1000);
+  // pages[1].last_fault = now - std::chrono::milliseconds(600);
+  // mark();
+  // trigger_read(0);
+  // print_pages();
+  // trigger_read(60);
+  // print_pages();
 
   printf("\n--- Exiting VM ---\n");
 }
