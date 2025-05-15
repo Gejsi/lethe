@@ -83,10 +83,8 @@ constexpr auto COLD_THRESHOLD = std::chrono::milliseconds(500);
 enum class PageState : u8 {
   // slot is empty
   Free,
-  // slot holds an accessible page
+  // slot holds a page
   Mapped,
-  // slot holds an inaccessible page
-  Probed
 };
 
 constexpr const char *page_state_to_str(PageState state) {
@@ -95,8 +93,6 @@ constexpr const char *page_state_to_str(PageState state) {
     return "Free";
   case PageState::Mapped:
     return "Mapped";
-  case PageState::Probed:
-    return "Probed";
   default:
     return "Unknown";
   }
@@ -107,30 +103,13 @@ constexpr const char *bool_to_str(bool b) { return b ? "true" : "false"; }
 struct Page {
   // Maps a virtual page from the heap to a cache slot
   uptr vaddr;
-  TimePoint last_fault;
-  TimePoint last_scan;
-  Milliseconds cit;
   PageState state;
 
-  Page() : vaddr(0), last_fault(), last_scan(), cit(), state(PageState::Free) {}
+  Page() : vaddr(0), state(PageState::Free) {}
 
   void print() const {
-    auto fault_ms =
-        std::chrono::duration_cast<Milliseconds>(last_fault.time_since_epoch())
-            .count();
-
-    auto scan_ms =
-        std::chrono::duration_cast<Milliseconds>(last_scan.time_since_epoch())
-            .count();
-
-    // auto cit = std::chrono::duration_cast<std::chrono::milliseconds>(
-    //                last_fault - last_scan)
-    //                .count();
-
-    printf("Page {\n  vaddr: 0x%lx,\n  state: %s,\n  last_fault: %ld ms,\n  "
-           "last_scan: %ld ms,\n"
-           "  cit: %ld ms\n}\n",
-           vaddr, page_state_to_str(state), fault_ms, scan_ms, cit.count());
+    printf("Page {\n  vaddr: 0x%lx,\n  state: %s\n}\n", vaddr,
+           page_state_to_str(state));
   }
 };
 
