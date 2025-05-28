@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -14,10 +15,10 @@
 #include "volimem/volimem.h"
 
 Page *pages;
+std::list<Page *> free_pages;
+std::list<Page *> active_pages, inactive_pages; // mapped pages
 void *cache_area;
 void *swap_area;
-std::list<Page *> active_list;
-std::list<Page *> inactive_list;
 // std::unique_ptr<Swapper> swapper;
 
 /**
@@ -99,6 +100,23 @@ void print_pages() {
   }
 }
 
+void print_lists() {
+  printf("=== Free Pages ===\n");
+  for (Page *p : free_pages) {
+    p->print();
+  }
+
+  printf("=== Inactive Pages ===\n");
+  for (Page *p : inactive_pages) {
+    p->print();
+  }
+
+  printf("=== Active Pages ===\n");
+  for (Page *p : active_pages) {
+    p->print();
+  }
+}
+
 void set_permissions(uptr vaddr, uptr flags, bool flush = true) {
   mapper_t::mprotect(vaddr, PAGE_SIZE, flags);
   if (flush) {
@@ -114,48 +132,6 @@ usize find_rr_page() {
   return idx;
 }
 
-usize find_clock_page() {
-  static usize clock_hand = 0;
-
-  // loop at most twice through the cache to ensure termination
-  for (usize i = 0; i < 2 * NUM_PAGES; ++i) {
-    Page &page = pages[clock_hand];
-
-    if (page.state == PageState::Mapped) {
-      uint64_t pte_flags = mapper_t::get_protect(page.vaddr);
-
-      if (pte_flags & PTE_A) {
-        // page was accessed: give it a second chance
-        DEBUG("  Slot %zu (VA 0x%lx) was accessed: clearing A-bit", clock_hand,
-              page.vaddr);
-        set_permissions(page.vaddr, pte_flags & ~(uptr)(PTE_A | PTE_D));
-      } else {
-        // page was NOT accessed since last A-bit clear: victim found
-        DEBUG("  Slot %zu (VA 0x%lx) NOT Accessed: selecting as victim",
-              clock_hand, page.vaddr);
-        usize victim_idx = clock_hand;
-        clock_hand = (clock_hand + 1) % NUM_PAGES;
-        return victim_idx;
-      }
-    } else if (page.state == PageState::Free) {
-      DEBUG("  Slot %zu is FREE. Skipping.", clock_hand);
-    }
-
-    clock_hand = (clock_hand + 1) % NUM_PAGES;
-  }
-
-  // If we've looped twice and haven't found an unreferenced page,
-  // it means all pages were referenced in the first pass and their A-bits
-  // cleared. In the second pass, we should find one (unless actively used
-  // during the scan). As a fallback, if all pages are extremely hot,
-  // just pick the current clock position.
-  WARN("All pages referenced after two full scans. Selecting current hand: %zu",
-       clock_hand);
-  usize fallback_idx = clock_hand;
-  clock_hand = (clock_hand + 1) % NUM_PAGES;
-  return fallback_idx;
-}
-
 std::optional<usize> find_free_page() {
   for (usize i = 0; i < NUM_PAGES; i++) {
     if (pages[i].state == PageState::Free) {
@@ -164,37 +140,46 @@ std::optional<usize> find_free_page() {
     }
   }
 
-  DEBUG("No free cache slots available");
   return std::nullopt;
 }
-
-// usize find_lru_page() {
-//   usize idx = 0;
-//   TimePoint oldest = TimePoint::max();
-//   bool found = false; // track if we found at least one mapped page
-
-//   for (usize i = 0; i < NUM_PAGES; i++) {
-//     if (pages[i].state != PageState::Free) {
-//       found = true;
-
-//       if (pages[i].last_fault < oldest) {
-//         oldest = pages[i].last_fault;
-//         idx = i;
-//       }
-//     }
-//   }
-
-//   // if the cache is full, we must have found at least one candidate
-//   ENSURE(found, "LRU didn't find any mapped pages");
-
-//   DEBUG("LRU cache slot selected: %zu", idx);
-//   return idx;
-// }
 
 inline bool pte_is_present(uptr pte) { return pte & PTE_P; }
 inline bool pte_is_writable(uptr pte) { return pte & PTE_W; }
 inline bool pte_is_accessed(uptr pte) { return pte & PTE_A; }
 inline bool pte_is_dirty(uptr pte) { return pte & PTE_D; }
+
+void demote() {
+  std::list<Page *> hot_pages;
+
+  while (!active_pages.empty()) {
+    Page *p = active_pages.back();
+    active_pages.pop_back();
+
+    auto pte = mapper_t::get_protect(p->vaddr);
+    if (pte_is_accessed(pte)) {
+      set_permissions(p->vaddr, pte & ~(uptr)(PTE_A | PTE_D));
+      hot_pages.push_front(p);
+    } else {
+      inactive_pages.push_front(p);
+    }
+  }
+
+  active_pages = std::move(hot_pages);
+}
+
+// O(1)
+std::optional<usize> retrieve_free_page() {
+  if (free_pages.empty()) {
+    DEBUG("No free cache slots available");
+    return std::nullopt;
+  }
+
+  Page *p = free_pages.front();
+  free_pages.pop_front();
+  usize idx = (usize)(p - pages); // index with pointer arithmetic
+  DEBUG("Free cache slot selected: %zu", idx);
+  return idx;
+}
 
 void swap_out(uptr victim_vaddr, uptr swap_dst) {
   // auto cache_slot = (uptr)cache_area + 0 * PAGE_SIZE;
@@ -229,7 +214,7 @@ void swap_out_page(usize victim_idx) {
 
   victim_page.vaddr = 0;
   victim_page.state = PageState::Free;
-  victim_page.last_fault = {};
+  free_pages.push_back(&victim_page);
 }
 
 void swap_in_page(usize target_idx, uptr aligned_fault_vaddr) {
@@ -246,20 +231,53 @@ void swap_in_page(usize target_idx, uptr aligned_fault_vaddr) {
   auto &target_page = pages[target_idx];
   target_page.vaddr = aligned_fault_vaddr;
   target_page.state = PageState::Mapped;
-  target_page.last_fault = Clock::now();
+  inactive_pages.push_back(&target_page);
+  // O(n)
+  auto it = std::find(free_pages.begin(), free_pages.end(), &target_page);
+  if (it != free_pages.end()) {
+    free_pages.erase(it);
+  }
 }
 
 void handle_fault(void *fault_addr) {
   DEBUG("Inside fault handler: %p", fault_addr);
   auto aligned_fault_vaddr = (uptr)fault_addr & ~(PAGE_SIZE - 1);
 
-  if (auto free_idx = find_free_page()) {
+  if (auto free_idx = retrieve_free_page()) {
     swap_in_page(*free_idx, aligned_fault_vaddr);
-  } else {
-    auto lru_idx = find_clock_page();
-    swap_out_page(lru_idx);
-    swap_in_page(lru_idx, aligned_fault_vaddr);
+    return;
   }
+
+  // try evicting a cold page from the inactive list
+  while (!inactive_pages.empty()) {
+    Page *victim_page = inactive_pages.back();
+    inactive_pages.pop_back();
+
+    auto pte = mapper_t::get_protect(victim_page->vaddr);
+    if (pte_is_accessed(pte)) {
+      // clear the accessed/dirty bits to track future accesses
+      set_permissions(victim_page->vaddr, pte & ~(uptr)(PTE_A | PTE_D));
+      active_pages.push_front(victim_page);
+    } else {
+      usize victim_idx = (usize)(victim_page - pages);
+      swap_out_page(victim_idx);
+      swap_in_page(victim_idx, aligned_fault_vaddr);
+      return;
+    }
+  }
+
+  // no evictable cold pages: evict from active list
+  if (!active_pages.empty()) {
+    Page *victim = active_pages.back();
+    active_pages.pop_back();
+
+    usize victim_idx = (usize)(victim - pages);
+    swap_out_page(victim_idx);
+    swap_in_page(victim_idx, aligned_fault_vaddr);
+    return;
+  }
+
+  PANIC("No pages available to evict!");
 }
 
 void virtual_main(void *args) {
@@ -282,33 +300,13 @@ void virtual_main(void *args) {
     UNUSED(tmp);
   }
 
-  // auto v = HEAP_START + 0 * PAGE_SIZE;
-  // auto pte = mapper_t::get_protect(v);
-  // DEBUG("ALL %lu", pte);
-  // DEBUG("PTE_P %s", bool_to_str(pte_is_present(pte)));
-  // DEBUG("PTE_W %s", bool_to_str(pte_is_writable(pte)));
-  // DEBUG("PTE_A %s", bool_to_str(pte_is_accessed(pte)));
-  // DEBUG("PTE_D %s", bool_to_str(pte_is_dirty(pte)));
-  // set_permissions(v, pte & ~(uptr)(PTE_A | PTE_D));
-  // pte = mapper_t::get_protect(v);
-  // DEBUG("ALL %lu", pte);
-  // DEBUG("PTE_P %s", bool_to_str(pte_is_present(pte)));
-  // DEBUG("PTE_W %s", bool_to_str(pte_is_writable(pte)));
-  // DEBUG("PTE_A %s", bool_to_str(pte_is_accessed(pte)));
-  // DEBUG("PTE_D %s", bool_to_str(pte_is_dirty(pte)));
-  // trigger_write(0, 0xdead);
+  print_lists();
 
-  // this successfully swaps the 2nd (1-index) page
-  // even though the the 1st one is initially set with an older
-  // fault time because it's accessed after a mark phase.
-  // auto now = Clock::now();
-  // pages[0].last_fault = now - std::chrono::milliseconds(1000);
-  // pages[1].last_fault = now - std::chrono::milliseconds(600);
-  // mark();
-  trigger_read(0);
-  print_pages();
-  trigger_read(60);
-  print_pages();
+  trigger_write(60, 0xdead);
+
+  print_lists();
+
+  // TODO: add background thread for `demote`
 
   printf("\n--- Exiting VM ---\n");
 }
@@ -317,6 +315,9 @@ int main() {
   cache_area = aligned_alloc(PAGE_SIZE, CACHE_SIZE);
   swap_area = aligned_alloc(PAGE_SIZE, SWAP_SIZE);
   pages = new Page[NUM_PAGES];
+  for (usize i = 0; i < NUM_PAGES; i++) {
+    free_pages.push_back(&pages[i]);
+  }
 
   DEBUG("CACHE 0x%lx", (uptr)cache_area);
   DEBUG("SWAP 0x%lx", (uptr)swap_area);

@@ -107,9 +107,17 @@ struct Page {
 
   Page() : vaddr(0), state(PageState::Free) {}
 
-  void print() const {
-    printf("Page {\n  vaddr: 0x%lx,\n  state: %s\n}\n", vaddr,
-           page_state_to_str(state));
+  void print(bool inline_output = true) const {
+    auto state_str = page_state_to_str(state);
+
+    if (inline_output) {
+      printf("Page { vaddr: 0x%lx, state: %s }\n", vaddr, state_str);
+    } else {
+      printf("Page {\n");
+      printf("  vaddr: 0x%lx,\n", vaddr);
+      printf("  state: %s\n", state_str);
+      printf("}\n");
+    }
   }
 };
 
