@@ -9,11 +9,12 @@
 #include <thread>
 #include <unistd.h>
 
+#include <volimem/mapper.h>
+#include <volimem/volimem.h>
+
 #include "swapper.h"
-// #include "tests/rr.cpp"
 #include "utils.h"
-#include "volimem/mapper.h"
-#include "volimem/volimem.h"
+// #include "tests/rr.cpp"
 
 Page *pages;
 std::list<Page *> free_pages;

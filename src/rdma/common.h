@@ -12,12 +12,6 @@
 #include <infiniband/verbs.h>
 #include <rdma/rdma_cma.h>
 
-#define rdma_error(...)                                                        \
-  do {                                                                         \
-    fprintf(stderr, "%s: %d : ERROR : ", __FILE__, __LINE__);                  \
-    fprintf(stderr, __VA_ARGS__);                                              \
-  } while (0)
-
 #ifdef ACN_RDMA_DEBUG
 /* Debug Macro */
 #define debug(msg, ...)                                                        \
