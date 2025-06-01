@@ -1,15 +1,30 @@
-# Swappine
+# Lethe
 
-Ensure VoliMem has been built and update `VOLIMEM_DIR` in the `Makefile` to the correct path.
+Compile all executables
 
 ```bash
-make
-# release mode
-make MODE=release
+mkdir -p build
+cd build
+cmake -G Ninja ..
+ninja
 ```
 
-# Run
+## Playground
+
+Useful to play around with the local-memory swapper or any VoliMem APIs.
 
 ```bash
-make run
+build/bin/playground
+```
+
+## RDMA example
+
+Server
+```bash
+build/bin/server
+```
+
+Client client
+```bash
+build/bin/client -a 10.0.0.1 -s foo
 ```

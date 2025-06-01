@@ -1,5 +1,4 @@
-/bin/
-/obj/
+/build/
 
 *.o
 *.a
@@ -9,3 +8,4 @@
 *.exe
 
 .clangd
+.cache/

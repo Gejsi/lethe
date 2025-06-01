@@ -10,7 +10,8 @@
 #include <unistd.h>
 
 #include "swapper.h"
-#include "tests/rr.cpp"
+// #include "tests/rr.cpp"
+#include "utils.h"
 #include "volimem/mapper.h"
 #include "volimem/volimem.h"
 
@@ -20,47 +21,6 @@ std::list<Page *> active_pages, inactive_pages; // mapped pages
 void *cache_area;
 void *swap_area;
 // std::unique_ptr<Swapper> swapper;
-
-/**
- * @param sample_fraction Percentage of pages to probe (e.g., 0.01 for 1%)
- */
-// void perform_probing_scan(double sample_fraction) {
-//     if (NUM_PAGES == 0 || sample_fraction <= 0.0) {
-//         return;
-//     }
-
-//     INFO("Starting probing scan (sampling %.2f%%)...", sample_fraction *
-//     100.0); auto now = get_current_timestamp(); usize pages_to_probe =
-//     static_cast<usize>(NUM_PAGES * sample_fraction); if (pages_to_probe == 0)
-//     pages_to_probe = 1; // Probe at least one if possible
-
-//     // Simple random sampling (can be improved)
-//     std::vector<usize> indices(NUM_PAGES);
-//     std::iota(indices.begin(), indices.end(), 0); // Fill with 0, 1, ...,
-//     NUM_PAGES-1 std::random_device rd; std::mt19937 g(rd());
-//     std::shuffle(indices.begin(), indices.end(), g);
-
-//     usize probed_count = 0;
-//     for (usize i = 0; i < NUM_PAGES && probed_count < pages_to_probe; ++i) {
-//         usize cache_idx = indices[i];
-//         uptr target_vaddr = pages[cache_idx].vaddr;
-
-//         // Only probe pages that are currently valid and mapped
-//         if (target_vaddr != 0 && mapper_t::is_mapped((void*)target_vaddr)) {
-//             DEBUG("Probing cache slot %zu (VAddr 0x%lx)", cache_idx,
-//             target_vaddr);
-
-//             set_permissions(PTE_NONE);
-
-//             // Update metadata
-//             pages[cache_idx].is_probed = true;
-//             pages[cache_idx].scan_timestamp = now;
-//             probed_count++;
-//         }
-//     }
-//     INFO("Probing scan finished. Marked %zu pages as inaccessible.",
-//     probed_count);
-// }
 
 auto allocate_page() {
   void *new_page = mmap(nullptr, PAGE_SIZE, PROT_READ | PROT_WRITE,
@@ -124,7 +84,7 @@ void set_permissions(uptr vaddr, uptr flags, bool flush = true) {
   }
 }
 
-usize find_rr_page() {
+usize retrieve_rr_page() {
   static usize next_idx = 0;
   usize idx = next_idx;
   next_idx = (next_idx + 1) % NUM_PAGES;
@@ -142,11 +102,6 @@ std::optional<usize> find_free_page() {
 
   return std::nullopt;
 }
-
-inline bool pte_is_present(uptr pte) { return pte & PTE_P; }
-inline bool pte_is_writable(uptr pte) { return pte & PTE_W; }
-inline bool pte_is_accessed(uptr pte) { return pte & PTE_A; }
-inline bool pte_is_dirty(uptr pte) { return pte & PTE_D; }
 
 void demote() {
   std::list<Page *> hot_pages;
@@ -255,7 +210,7 @@ void handle_fault(void *fault_addr) {
 
     auto pte = mapper_t::get_protect(victim_page->vaddr);
     if (pte_is_accessed(pte)) {
-      // clear the accessed/dirty bits to track future accesses
+      // clear the accessed and dirty bits to check future accesses
       set_permissions(victim_page->vaddr, pte & ~(uptr)(PTE_A | PTE_D));
       active_pages.push_front(victim_page);
     } else {
@@ -268,10 +223,10 @@ void handle_fault(void *fault_addr) {
 
   // no evictable cold pages: evict from active list
   if (!active_pages.empty()) {
-    Page *victim = active_pages.back();
+    Page *victim_page = active_pages.back();
     active_pages.pop_back();
 
-    usize victim_idx = (usize)(victim - pages);
+    usize victim_idx = (usize)(victim_page - pages);
     swap_out_page(victim_idx);
     swap_in_page(victim_idx, aligned_fault_vaddr);
     return;
@@ -328,6 +283,10 @@ int main() {
       .host_page_type = VOLIMEM_NORMAL_PAGES,
       .guest_page_type = VOLIMEM_NORMAL_PAGES,
   };
+
+  // std::thread t([] { std::cout << "Hello from a thread!\n"; });
+  // t.join();
+  // std::cout << "Back in main\n";
 
   volimem_set_config(&voli_config);
   return volimem_start(nullptr, virtual_main);

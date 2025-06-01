@@ -5,8 +5,6 @@
 #include <cstdio>
 #include <cstdlib>
 
-#include "volimem/mapper.h"
-
 #define UNUSED(x) (void)(x)
 
 // ANSI color codes
