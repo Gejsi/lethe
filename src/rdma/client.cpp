@@ -430,8 +430,8 @@ void usage() {
 
 void run(void *any) {
 #if VOLIMEM
-  printf("Running on the vCPU apic %d\n", local_vcpu->lapic_id);
-  printf("Root page table is at %p\n", (page_table_t *)mapper_t::get_root());
+  // printf("Running on the vCPU apic %d\n", local_vcpu->lapic_id);
+  // printf("Root page table is at %p\n", (page_table_t *)mapper_t::get_root());
 #endif
 
   int ret;
@@ -446,12 +446,6 @@ void run(void *any) {
     printf("\nSUCCESS, source and destination buffers match\n");
   }
 }
-
-constexpr s_volimem_config_t voli_config{
-    .log_level = INFO,
-    .host_page_type = VOLIMEM_NORMAL_PAGES,
-    .guest_page_type = VOLIMEM_NORMAL_PAGES,
-};
 
 int main(int argc, char **argv) {
 
@@ -532,6 +526,12 @@ int main(int argc, char **argv) {
   }
 
 #if VOLIMEM
+  constexpr s_volimem_config_t voli_config{
+      .log_level = INFO,
+      .host_page_type = VOLIMEM_NORMAL_PAGES,
+      .guest_page_type = VOLIMEM_NORMAL_PAGES,
+  };
+
   volimem_set_config(&voli_config);
   return volimem_start(nullptr, run);
 #else

@@ -1,7 +1,3 @@
-/*
- * TODO: Cleanup previously allocated resources in case of an error condition
- */
-
 #include <cstdint>
 
 #include "common.h"
@@ -352,65 +348,144 @@ static int send_server_metadata_to_client() {
   return 0;
 }
 
+static void cleanup() {
+  int ret;
+
+  debug("Forcing cleanup of all known RDMA resources...\n");
+
+  // Order of destruction should generally be reverse of allocation,
+  // or based on dependencies (e.g., QPs before CQs/PDs they use, MRs before
+  // PDs).
+
+  // Client-specific resources (QP, CM ID, MRs)
+  if (cm_client_id) {
+    // If QP was created (client_qp would be non-NULL and cm_client_id->qp would
+    // point to it) rdma_destroy_qp is often called on the cm_id that owns the
+    // QP. The original disconnect_and_cleanup calls
+    // rdma_destroy_qp(cm_client_id)
+    if (cm_client_id->qp) { // Check if the cm_id actually has a qp
+      debug("Destroying QP associated with cm_client_id %p\n",
+            (void *)cm_client_id);
+      rdma_destroy_qp(cm_client_id);
+    }
+    client_qp = NULL;
+
+    debug("Destroying client CM ID %p\n", (void *)cm_client_id);
+    ret = rdma_destroy_id(cm_client_id);
+    if (ret) {
+      ERROR("Failed to destroy client CM ID cleanly, errno: %d. Continuing.",
+            -errno);
+    }
+    cm_client_id = NULL;
+  }
+  client_qp = NULL;
+
+  // Memory Regions
+  if (server_buffer_mr) {
+    debug("Freeing server_buffer_mr %p\n", (void *)server_buffer_mr);
+    rdma_buffer_free(server_buffer_mr);
+    server_buffer_mr = NULL;
+  }
+  if (server_metadata_mr) {
+    debug("Deregistering server_metadata_mr %p\n", (void *)server_metadata_mr);
+    rdma_buffer_deregister(server_metadata_mr);
+    server_metadata_mr = NULL;
+  }
+  if (client_metadata_mr) {
+    debug("Deregistering client_metadata_mr %p\n", (void *)client_metadata_mr);
+    rdma_buffer_deregister(client_metadata_mr);
+    client_metadata_mr = NULL;
+  }
+
+  // Completion Queue and Channel
+  if (cq) {
+    debug("Destroying CQ %p\n", (void *)cq);
+    ret = ibv_destroy_cq(cq);
+    if (ret) {
+      ERROR("Failed to destroy CQ cleanly, errno: %d. Continuing.", -errno);
+    }
+    cq = NULL;
+  }
+  if (io_completion_channel) {
+    debug("Destroying IO completion channel %p\n",
+          (void *)io_completion_channel);
+    ret = ibv_destroy_comp_channel(io_completion_channel);
+    if (ret) {
+      ERROR("Failed to destroy IO completion channel cleanly, errno: %d. "
+            "Continuing.",
+            -errno);
+    }
+    io_completion_channel = NULL;
+  }
+
+  // Protection Domain
+  if (pd) {
+    debug("Deallocating PD %p\n", (void *)pd);
+    ret = ibv_dealloc_pd(pd);
+    if (ret) {
+      ERROR("Failed to deallocate PD cleanly, errno: %d. Continuing.", -errno);
+    }
+    pd = NULL;
+  }
+
+  // Server's listening ID and main event channel
+  if (cm_server_id) {
+    debug("Destroying server CM ID %p\n", (void *)cm_server_id);
+    ret = rdma_destroy_id(cm_server_id);
+    if (ret) {
+      ERROR("Failed to destroy server CM ID cleanly, errno: %d. Continuing.",
+            -errno);
+    }
+    cm_server_id = NULL;
+  }
+  if (cm_event_channel) {
+    debug("Destroying CM event channel %p\n", (void *)cm_event_channel);
+    rdma_destroy_event_channel(cm_event_channel);
+    cm_event_channel = NULL;
+  }
+
+  debug("Resources cleanup complete.\n");
+}
+
 /* This is server side logic. Server passively waits for the client to call
  * rdma_disconnect() and then it will clean up its resources */
 static int disconnect_and_cleanup() {
-  struct rdma_cm_event *cm_event = NULL;
+  struct rdma_cm_event *cm_event = NULL; // Important: initialize to NULL
   int ret = -1;
-  /* Now we wait for the client to send us disconnect event */
+
+  if (!cm_event_channel) {
+    ERROR("CM Event Channel is NULL, cannot process disconnect event. "
+          "Proceeding to force cleanup.\n");
+    cleanup();
+    return -1;
+  }
+
+  // Now we wait for the client to send us disconnect event
   debug("Waiting for cm event: RDMA_CM_EVENT_DISCONNECTED\n");
   ret = process_rdma_cm_event(cm_event_channel, RDMA_CM_EVENT_DISCONNECTED,
                               &cm_event);
   if (ret) {
-    ERROR("Failed to get disconnect event, ret = %d", ret);
+    ERROR("Failed to get disconnect event, ret = %d. Proceeding to force "
+          "cleanup.\n",
+          ret);
+    cleanup();
     return ret;
   }
+
   /* We acknowledge the event */
   ret = rdma_ack_cm_event(cm_event);
   if (ret) {
-    ERROR("Failed to acknowledge the cm event %d", -errno);
+    ERROR("Failed to acknowledge the cm event errno: %d. Proceeding to force "
+          "cleanup.\n",
+          -errno);
+    cleanup();
     return -errno;
   }
   printf("A disconnect event is received from the client...\n");
-  /* We free all the resources */
-  /* Destroy QP */
-  rdma_destroy_qp(cm_client_id);
-  /* Destroy client cm id */
-  ret = rdma_destroy_id(cm_client_id);
-  if (ret) {
-    ERROR("Failed to destroy client id cleanly, %d", -errno);
-    // we continue anyways;
-  }
-  /* Destroy CQ */
-  ret = ibv_destroy_cq(cq);
-  if (ret) {
-    ERROR("Failed to destroy completion queue cleanly, %d", -errno);
-    // we continue anyways;
-  }
-  /* Destroy completion channel */
-  ret = ibv_destroy_comp_channel(io_completion_channel);
-  if (ret) {
-    ERROR("Failed to destroy completion channel cleanly, %d", -errno);
-    // we continue anyways;
-  }
-  /* Destroy memory buffers */
-  rdma_buffer_free(server_buffer_mr);
-  rdma_buffer_deregister(server_metadata_mr);
-  rdma_buffer_deregister(client_metadata_mr);
-  /* Destroy protection domain */
-  ret = ibv_dealloc_pd(pd);
-  if (ret) {
-    ERROR("Failed to destroy client protection domain cleanly, %d", -errno);
-    // we continue anyways;
-  }
-  /* Destroy rdma server id */
-  ret = rdma_destroy_id(cm_server_id);
-  if (ret) {
-    ERROR("Failed to destroy server id cleanly, %d", -errno);
-    // we continue anyways;
-  }
-  rdma_destroy_event_channel(cm_event_channel);
-  printf("Server shut-down is complete \n");
+
+  cleanup();
+
+  printf("Server shut-down is complete.\n");
   return 0;
 }
 
@@ -454,27 +529,32 @@ int main(int argc, char **argv) {
   ret = start_rdma_server(&server_sockaddr);
   if (ret) {
     ERROR("RDMA server failed to start cleanly, ret = %d", ret);
-    return ret;
+    goto cleanup_error;
   }
   ret = setup_client_resources();
   if (ret) {
     ERROR("Failed to setup client resources, ret = %d", ret);
-    return ret;
+    goto cleanup_error;
   }
   ret = accept_client_connection();
   if (ret) {
     ERROR("Failed to handle client cleanly, ret = %d ", ret);
-    return ret;
+    goto cleanup_error;
   }
   ret = send_server_metadata_to_client();
   if (ret) {
     ERROR("Failed to send server metadata to the client, ret = %d ", ret);
-    return ret;
+    goto cleanup_error;
   }
   ret = disconnect_and_cleanup();
   if (ret) {
     ERROR("Failed to clean up resources properly, ret = %d ", ret);
-    return ret;
   }
-  return 0;
+
+  return ret;
+
+cleanup_error:
+  ERROR("An error occurred. Cleaning up resources.\n");
+  cleanup();
+  return (ret == 0 ? -1 : ret);
 }

@@ -42,7 +42,7 @@ struct __attribute((packed)) rdma_buffer_attr {
   uint64_t address;
   uint32_t length;
   union stag {
-    /* if we send, we call it local stags */
+    /* if we send, we call it local stag */
     uint32_t local_stag;
     /* if we receive, we call it remote stag */
     uint32_t remote_stag;
