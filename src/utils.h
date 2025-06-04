@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <thread>
 #include <volimem/x86constants.h>
 
 #define UNUSED(x) (void)(x)
@@ -76,7 +77,13 @@ constexpr usize KB = 1024;
 constexpr usize MB = KB * KB;
 constexpr usize GB = MB * KB;
 
-constexpr const char *bool_to_str(bool b) { return b ? "true" : "false"; }
+constexpr inline const char *bool_to_str(bool b) {
+  return b ? "true" : "false";
+}
+
+inline void sleep_ms(usize ms) {
+  std::this_thread::sleep_for(Milliseconds(ms));
+}
 
 bool pte_is_present(uptr pte);
 bool pte_is_writable(uptr pte);

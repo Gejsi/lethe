@@ -1,12 +1,10 @@
 #include <algorithm>
-#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <list>
 #include <span>
 #include <sys/mman.h>
-#include <thread>
 #include <unistd.h>
 
 #include <volimem/mapper.h>
@@ -27,10 +25,6 @@ auto allocate_page() {
   void *new_page = mmap(nullptr, PAGE_SIZE, PROT_READ | PROT_WRITE,
                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   return mapper_t::gva_to_gpa(new_page);
-}
-
-inline void sleep_ms(usize ms) {
-  std::this_thread::sleep_for(std::chrono::milliseconds(ms));
 }
 
 void trigger_write(usize page_idx, uptr value) {
@@ -188,10 +182,11 @@ void swap_in_page(usize target_idx, uptr aligned_fault_vaddr) {
   target_page.vaddr = aligned_fault_vaddr;
   target_page.state = PageState::Mapped;
   inactive_pages.push_back(&target_page);
-  // O(n)
-  auto it = std::find(free_pages.begin(), free_pages.end(), &target_page);
-  if (it != free_pages.end()) {
-    free_pages.erase(it);
+  // FIX: O(n)
+  auto free_page =
+      std::find(free_pages.begin(), free_pages.end(), &target_page);
+  if (free_page != free_pages.end()) {
+    free_pages.erase(free_page);
   }
 }
 

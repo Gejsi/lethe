@@ -24,7 +24,10 @@
 
 /* Capacity of the completion queue (CQ) */
 #define CQ_CAPACITY (16)
-/* MAX SGE capacity */
+/*
+ * An SGE (struct ibv_sge) describes a contiguous block of memory
+ * with its address, length, and lkey.
+ */
 #define MAX_SGE (2)
 /* MAX work requests */
 #define MAX_WR (8)
@@ -32,15 +35,13 @@
 #define DEFAULT_RDMA_PORT (20886)
 
 /*
- * We use attribute so that compiler does not step in and try to pad the
- * structure. We use this structure to exchange information between the server
- * and the client.
- *
- * For details see: http://gcc.gnu.org/onlinedocs/gcc/Type-Attributes.html
+ * Use this structure to exchange information between the server
+ * and the client. Pack it to avoid padding from the compiler.
  */
 struct __attribute((packed)) rdma_buffer_attr {
   uint64_t address;
   uint32_t length;
+  // Steering Tag (or memory key)
   union stag {
     /* if we send, we call it local stag */
     uint32_t local_stag;
@@ -106,8 +107,8 @@ void rdma_buffer_deregister(struct ibv_mr *mr);
  * @max_wc: Maximum number of expected work completion (WC) elements. wc must be
  *          atleast this size.
  */
-int process_work_completion_events(struct ibv_comp_channel *comp_channel,
-                                   struct ibv_wc *wc, int max_wc);
+int await_work_completion_events(struct ibv_comp_channel *comp_channel,
+                                 struct ibv_wc *wc, int max_wc);
 
 /* prints some details from the cm id */
 void show_rdma_cmid(struct rdma_cm_id *id);

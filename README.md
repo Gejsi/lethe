@@ -24,7 +24,7 @@ Server
 build/bin/server
 ```
 
-Client client
+Client
 ```bash
 build/bin/client -a 10.0.0.1 -s foo
 ```

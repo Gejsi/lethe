@@ -1,18 +1,29 @@
 #include <cstdint>
+#include <volimem/mapper.h>
+#include <volimem/vcpu.h>
 #include <volimem/volimem.h>
 
 #include "common.h"
+#include "swapper.h"
 #include "utils.h"
 
 /* RDMA connection related resources */
 static struct rdma_event_channel *cm_event_channel = NULL;
 static struct rdma_cm_id *cm_client_id = NULL;
-static struct ibv_pd *pd = NULL;
+static struct ibv_pd *pd = NULL; // protection domain
 static struct ibv_comp_channel *io_completion_channel = NULL;
-static struct ibv_cq *client_cq = NULL;
+static struct ibv_cq *client_cq = NULL; // completion queue
 static struct ibv_qp_init_attr qp_init_attr;
-static struct ibv_qp *client_qp;
-/* These are memory buffers related resources */
+static struct ibv_qp *client_qp; // queue pair
+
+// Metadata Exchange: before one side can RDMA READ or WRITE to the other
+// side's memory, it needs to know:
+//  - The virtual address of the remote buffer.
+//  - The length of the remote buffer.
+//  - The remote memory key (rkey) authorizing access to that buffer.
+// This information (often called "buffer attributes" or "metadata") is
+// typically exchanged using SEND/RECV operations after the connection is
+// established.
 static struct ibv_mr *client_metadata_mr = NULL, *client_src_mr = NULL,
                      *client_dst_mr = NULL, *server_metadata_mr = NULL;
 static struct rdma_buffer_attr client_metadata_attr, server_metadata_attr;
@@ -55,7 +66,7 @@ static int client_prepare_connection(struct sockaddr_in *s_addr) {
    * to a local device. */
   ret = rdma_resolve_addr(cm_client_id, NULL, (struct sockaddr *)s_addr, 2000);
   if (ret) {
-    ERROR("Failed to resolve address, errno: %d ", -errno);
+    ERROR("Failed to resolve address, errno: %d", -errno);
     return -errno;
   }
   debug("waiting for cm event: RDMA_CM_EVENT_ADDR_RESOLVED\n");
@@ -141,7 +152,7 @@ static int client_prepare_connection(struct sockaddr_in *s_addr) {
   /* Now the last step, set up the queue pair (send, recv) queues and their
    * capacity. The capacity here is define statically but this can be probed
    * from the device. We just use a small number as defined in rdma_common.h */
-  bzero(&qp_init_attr, sizeof qp_init_attr);
+  memset(&qp_init_attr, 0, sizeof(qp_init_attr));
   qp_init_attr.cap.max_recv_sge = MAX_SGE; /* Maximum SGE per receive posting */
   qp_init_attr.cap.max_recv_wr = MAX_WR; /* Maximum receive posting capacity */
   qp_init_attr.cap.max_send_sge = MAX_SGE; /* Maximum SGE per send posting */
@@ -179,17 +190,17 @@ static int client_pre_post_recv_buffer() {
   server_recv_sge.length = (uint32_t)server_metadata_mr->length;
   server_recv_sge.lkey = (uint32_t)server_metadata_mr->lkey;
   /* now we link it to the request */
-  bzero(&server_recv_wr, sizeof(server_recv_wr));
+  memset(&server_recv_wr, 0, sizeof(server_recv_wr));
   server_recv_wr.sg_list = &server_recv_sge;
   server_recv_wr.num_sge = 1;
   ret = ibv_post_recv(client_qp /* which QP */,
                       &server_recv_wr /* receive work request*/,
                       &bad_server_recv_wr /* error WRs */);
   if (ret) {
-    ERROR("Failed to pre-post the receive buffer, errno: %d ", ret);
+    ERROR("Failed to pre-post the receive buffer, errno: %d", ret);
     return ret;
   }
-  debug("Receive buffer pre-posting is successful \n");
+  debug("Receive buffer pre-posting is successful\n");
   return 0;
 }
 
@@ -198,7 +209,7 @@ static int client_connect_to_server() {
   struct rdma_conn_param conn_param;
   struct rdma_cm_event *cm_event = NULL;
   int ret = -1;
-  bzero(&conn_param, sizeof(conn_param));
+  memset(&conn_param, 0, sizeof(conn_param));
   conn_param.initiator_depth = 3;
   conn_param.responder_resources = 3;
   conn_param.retry_count = 3; // if fail, then how many times to retry
@@ -228,7 +239,7 @@ static int client_connect_to_server() {
  * used because this program is client driven. But it shown here how to do it
  * for the illustration purposes
  */
-static int client_xchange_metadata_with_server() {
+static int exchange_metadata_with_server() {
   struct ibv_wc wc[2];
   int ret = -1;
   client_src_mr =
@@ -257,7 +268,7 @@ static int client_xchange_metadata_with_server() {
   client_send_sge.length = (uint32_t)client_metadata_mr->length;
   client_send_sge.lkey = client_metadata_mr->lkey;
   /* now we link to the send work request */
-  bzero(&client_send_wr, sizeof(client_send_wr));
+  memset(&client_send_wr, 0, sizeof(client_send_wr));
   client_send_wr.sg_list = &client_send_sge;
   client_send_wr.num_sge = 1;
   client_send_wr.opcode = IBV_WR_SEND;
@@ -271,7 +282,7 @@ static int client_xchange_metadata_with_server() {
   /* at this point we are expecting 2 work completion. One for our
    * send and one for recv that we will get from the server for
    * its buffer information */
-  ret = process_work_completion_events(io_completion_channel, wc, 2);
+  ret = await_work_completion_events(io_completion_channel, wc, 2);
   if (ret != 2) {
     ERROR("We failed to get 2 work completions , ret = %d ", ret);
     return ret;
@@ -281,10 +292,10 @@ static int client_xchange_metadata_with_server() {
   return 0;
 }
 
-/* This function does :
+/* This function does:
  * 1) Prepare memory buffers for RDMA operations
  * 1) RDMA write from src -> remote buffer
- * 2) RDMA read from remote bufer -> dst
+ * 2) RDMA read from remote buffer -> dst
  */
 static int client_remote_memory_ops() {
   struct ibv_wc wc;
@@ -305,7 +316,7 @@ static int client_remote_memory_ops() {
   client_send_sge.length = (uint32_t)client_src_mr->length;
   client_send_sge.lkey = client_src_mr->lkey;
   /* now we link to the send work request */
-  bzero(&client_send_wr, sizeof(client_send_wr));
+  memset(&client_send_wr, 0, sizeof(client_send_wr));
   client_send_wr.sg_list = &client_send_sge;
   client_send_wr.num_sge = 1;
   client_send_wr.opcode = IBV_WR_RDMA_WRITE;
@@ -320,18 +331,18 @@ static int client_remote_memory_ops() {
     return -errno;
   }
   /* at this point we are expecting 1 work completion for the write */
-  ret = process_work_completion_events(io_completion_channel, &wc, 1);
+  ret = await_work_completion_events(io_completion_channel, &wc, 1);
   if (ret != 1) {
-    ERROR("We failed to get 1 work completions , ret = %d ", ret);
+    ERROR("We failed to get 1 work completions , ret = %d", ret);
     return ret;
   }
-  debug("Client side WRITE is complete \n");
+  debug("Client side WRITE is complete\n");
   /* Now we prepare a READ using same variables but for destination */
   client_send_sge.addr = (uint64_t)client_dst_mr->addr;
   client_send_sge.length = (uint32_t)client_dst_mr->length;
   client_send_sge.lkey = client_dst_mr->lkey;
   /* now we link to the send work request */
-  bzero(&client_send_wr, sizeof(client_send_wr));
+  memset(&client_send_wr, 0, sizeof(client_send_wr));
   client_send_wr.sg_list = &client_send_sge;
   client_send_wr.num_sge = 1;
   client_send_wr.opcode = IBV_WR_RDMA_READ;
@@ -347,7 +358,7 @@ static int client_remote_memory_ops() {
     return -errno;
   }
   /* at this point we are expecting 1 work completion for the write */
-  ret = process_work_completion_events(io_completion_channel, &wc, 1);
+  ret = await_work_completion_events(io_completion_channel, &wc, 1);
   if (ret != 1) {
     ERROR("We failed to get 1 work completions , ret = %d ", ret);
     return ret;
@@ -420,18 +431,18 @@ static int client_disconnect_and_clean() {
 
 void usage() {
   printf("Usage:\n");
-  printf("rdma_client: [-a <server_addr>] [-p <server_port>] -s string "
-         "(required)\n");
-  printf("(default IP is 127.0.0.1 and port is %d)\n", DEFAULT_RDMA_PORT);
+  printf("client [-a <server_addr>] [-p <server_port>] -s <string>\n");
+  printf("(default port: %d)\n", DEFAULT_RDMA_PORT);
   exit(1);
 }
 
-#define VOLIMEM 0
+#define VOLIMEM 1
 
 void run(void *any) {
 #if VOLIMEM
-  // printf("Running on the vCPU apic %d\n", local_vcpu->lapic_id);
-  // printf("Root page table is at %p\n", (page_table_t *)mapper_t::get_root());
+  printf("--- Inside VM ---\n\n");
+  printf("Running on the vCPU apic %d\n", local_vcpu->lapic_id);
+  printf("Root page table is at %p\n", (page_table_t *)mapper_t::get_root());
 #endif
 
   int ret;
@@ -443,19 +454,20 @@ void run(void *any) {
   if (check_src_dst()) {
     ERROR("src and dst buffers do not match");
   } else {
-    printf("\nSUCCESS, source and destination buffers match\n");
+    printf("SUCCESS, source and destination buffers match\n");
   }
+
+#if VOLIMEM
+  printf("\n--- Exiting VM ---\n");
+#endif
 }
 
 int main(int argc, char **argv) {
-
   struct sockaddr_in server_sockaddr;
   int ret, option;
-  bzero(&server_sockaddr, sizeof server_sockaddr);
+  memset(&server_sockaddr, 0, sizeof(server_sockaddr));
   server_sockaddr.sin_family = AF_INET;
   server_sockaddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  /* buffers are NULL */
-  src = dst = NULL;
 
   /* Parse Command Line Arguments */
   while ((option = getopt(argc, argv, "s:a:p:")) != -1) {
@@ -481,7 +493,7 @@ int main(int argc, char **argv) {
       /* remember, this overwrites the port info */
       ret = get_addr(optarg, (struct sockaddr *)&server_sockaddr);
       if (ret) {
-        ERROR("Invalid IP ");
+        ERROR("Invalid IP");
         return ret;
       }
       break;
@@ -505,23 +517,23 @@ int main(int argc, char **argv) {
   }
   ret = client_prepare_connection(&server_sockaddr);
   if (ret) {
-    ERROR("Failed to setup client connection , ret = %d ", ret);
+    ERROR("Failed to setup client connection, ret = %d ", ret);
     return ret;
   }
 
   ret = client_pre_post_recv_buffer();
   if (ret) {
-    ERROR("Failed to setup client connection , ret = %d ", ret);
+    ERROR("Failed to setup client connection, ret = %d ", ret);
     return ret;
   }
   ret = client_connect_to_server();
   if (ret) {
-    ERROR("Failed to setup client connection , ret = %d ", ret);
+    ERROR("Failed to setup client connection, ret = %d ", ret);
     return ret;
   }
-  ret = client_xchange_metadata_with_server();
+  ret = exchange_metadata_with_server();
   if (ret) {
-    ERROR("Failed to setup client connection , ret = %d ", ret);
+    ERROR("Failed to setup client connection, ret = %d ", ret);
     return ret;
   }
 
@@ -533,7 +545,7 @@ int main(int argc, char **argv) {
   };
 
   volimem_set_config(&voli_config);
-  return volimem_start(nullptr, run);
+  volimem_start(nullptr, run);
 #else
   run(nullptr);
 #endif

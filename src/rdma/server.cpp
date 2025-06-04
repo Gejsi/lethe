@@ -13,7 +13,7 @@ static struct ibv_cq *cq = NULL;
 static struct ibv_qp_init_attr qp_init_attr;
 static struct ibv_qp *client_qp = NULL;
 /* RDMA memory resources */
-static struct ibv_mr *client_metadata_mr = NULL, *server_buffer_mr = NULL,
+static struct ibv_mr *client_metadata_mr = NULL, *swap_area = NULL,
                      *server_metadata_mr = NULL;
 static struct rdma_buffer_attr client_metadata_attr, server_metadata_attr;
 static struct ibv_recv_wr client_recv_wr, *bad_client_recv_wr = NULL;
@@ -31,6 +31,7 @@ static int setup_client_resources() {
     ERROR("Client id is still NULL");
     return -EINVAL;
   }
+
   /* We have a valid connection identifier, lets start to allocate
    * resources. We need:
    * 1. Protection Domains (PD)
@@ -41,17 +42,17 @@ static int setup_client_resources() {
    * in the operating system. All resources are tied to a particular PD.
    * And accessing recourses across PD will result in a protection fault.
    */
-  pd = ibv_alloc_pd(cm_client_id->verbs
-                    /* verbs defines a verb's provider,
-                     * i.e an RDMA device where the incoming
-                     * client connection came */
-  );
+
+  /* verbs defines a verb's provider,
+   * i.e an RDMA device where the incoming
+   * client connection came */
+  pd = ibv_alloc_pd(cm_client_id->verbs);
   if (!pd) {
     ERROR("Failed to allocate a protection domain errno: %d", -errno);
     return -errno;
   }
   debug("A new protection domain is allocated at %p \n", pd);
-  /* Now we need a completion channel, were the I/O completion
+  /* Now we need a completion channel, where the I/O completion
    * notifications are sent. Remember, this is different from connection
    * management (CM) event notifications.
    * A completion channel is also tied to an RDMA device, hence we will
@@ -67,8 +68,8 @@ static int setup_client_resources() {
   /* Now we create a completion queue (CQ) where actual I/O
    * completion metadata is placed. The metadata is packed into a structure
    * called struct ibv_wc (wc = work completion). ibv_wc has detailed
-   * information about the work completion. An I/O request in RDMA world
-   * is called "work" ;)
+   * information about the work completion.
+   * An I/O request in the RDMA world is called "work"
    */
   cq = ibv_create_cq(cm_client_id->verbs /* which device*/,
                      CQ_CAPACITY /* maximum capacity*/,
@@ -79,7 +80,7 @@ static int setup_client_resources() {
     ERROR("Failed to create a completion queue (cq), errno: %d", -errno);
     return -errno;
   }
-  debug("Completion queue (CQ) is created at %p with %d elements \n", cq,
+  debug("Completion queue (CQ) is created at %p with %d elements\n", cq,
         cq->cqe);
   /* Ask for the event for all activities in the completion queue*/
   ret = ibv_req_notify_cq(cq /* on which CQ */,
@@ -123,7 +124,7 @@ static int start_rdma_server(struct sockaddr_in *server_addr) {
   /*  Open a channel used to report asynchronous communication event */
   cm_event_channel = rdma_create_event_channel();
   if (!cm_event_channel) {
-    ERROR("Creating cm event channel failed with errno: (%d)", -errno);
+    ERROR("Creating cm event channel failed with errno: %d", -errno);
     return -errno;
   }
   debug("RDMA CM event channel is created successfully at %p \n",
@@ -143,7 +144,7 @@ static int start_rdma_server(struct sockaddr_in *server_addr) {
     ERROR("Failed to bind server address, errno: %d", -errno);
     return -errno;
   }
-  debug("Server RDMA CM id is successfully binded \n");
+  debug("Server RDMA CM id is successfully binded\n");
   /* Now we start to listen on the passed IP and port. However unlike
    * normal TCP listen, this is a non-blocking call. When a new client is
    * connected, a new connection management (CM) event is generated on the
@@ -190,7 +191,6 @@ static int start_rdma_server(struct sockaddr_in *server_addr) {
 static int accept_client_connection() {
   struct rdma_conn_param conn_param;
   struct rdma_cm_event *cm_event = NULL;
-  struct sockaddr_in remote_sockaddr;
   int ret = -1;
   if (!cm_client_id || !client_qp) {
     ERROR("Client resources are not properly setup");
@@ -200,7 +200,7 @@ static int accept_client_connection() {
    * metadata*/
   client_metadata_mr = rdma_buffer_register(
       pd /* which protection domain */, &client_metadata_attr /* what memory */,
-      sizeof(client_metadata_attr) /* what length */,
+      sizeof(client_metadata_attr),
       (IBV_ACCESS_LOCAL_WRITE) /* access permissions */);
   if (!client_metadata_mr) {
     ERROR("Failed to register client attr buffer");
@@ -209,12 +209,11 @@ static int accept_client_connection() {
   }
   /* We pre-post this receive buffer on the QP. SGE credentials is where we
    * receive the metadata from the client */
-  client_recv_sge.addr =
-      (uint64_t)client_metadata_mr->addr; // same as &client_buffer_attr
+  client_recv_sge.addr = (uint64_t)client_metadata_mr->addr;
   client_recv_sge.length = (uint32_t)client_metadata_mr->length;
   client_recv_sge.lkey = client_metadata_mr->lkey;
   /* Now we link this SGE to the work request (WR) */
-  bzero(&client_recv_wr, sizeof(client_recv_wr));
+  memset(&client_recv_wr, 0, sizeof(client_recv_wr));
   client_recv_wr.sg_list = &client_recv_sge;
   client_recv_wr.num_sge = 1; // only one SGE
   ret = ibv_post_recv(client_qp /* which QP */,
@@ -224,7 +223,7 @@ static int accept_client_connection() {
     ERROR("Failed to pre-post the receive buffer, errno: %d", ret);
     return ret;
   }
-  debug("Receive buffer pre-posting is successful \n");
+  debug("Receive buffer pre-posting is successful\n");
   /* Now we accept the connection. Recall we have not accepted the connection
    * yet because we have to do lots of resource pre-allocation */
   memset(&conn_param, 0, sizeof(conn_param));
@@ -256,11 +255,12 @@ static int accept_client_connection() {
     ERROR("Failed to acknowledge the cm event %d", -errno);
     return -errno;
   }
-  /* Just FYI: How to extract connection information */
+  /* extract connection information for logs */
+  struct sockaddr_in remote_sockaddr;
   memcpy(&remote_sockaddr /* where to save */,
          rdma_get_peer_addr(cm_client_id) /* gives you remote sockaddr */,
          sizeof(struct sockaddr_in) /* max size */);
-  printf("A new connection is accepted from %s \n",
+  printf("A new connection is accepted from %s\n",
          inet_ntoa(remote_sockaddr.sin_addr));
   return ret;
 }
@@ -274,46 +274,44 @@ static int send_server_metadata_to_client() {
    * in our example. We will receive a work completion notification for
    * our pre-posted receive request.
    */
-  ret = process_work_completion_events(io_completion_channel, &wc, 1);
+  ret = await_work_completion_events(io_completion_channel, &wc, 1);
   if (ret != 1) {
     ERROR("Failed to receive: %d", ret);
     return ret;
   }
-  /* if all good, then we should have client's buffer information, lets see */
+  /* check if have client's metadata */
   printf("Client side buffer information is received...\n");
   show_rdma_buffer_attr(&client_metadata_attr);
-  printf("The client has requested buffer length of : %u bytes \n",
+  printf("The client has requested buffer length of: %u bytes \n",
          client_metadata_attr.length);
   /* We need to setup requested memory buffer. This is where the client will
    * do RDMA READs and WRITEs. */
-  server_buffer_mr =
-      rdma_buffer_alloc(pd /* which protection domain */,
-                        client_metadata_attr.length /* what size to allocate */,
-                        static_cast<ibv_access_flags>(
-                            IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ |
-                            IBV_ACCESS_REMOTE_WRITE) /* access permissions */);
-  if (!server_buffer_mr) {
-    ERROR("Server failed to create a buffer");
+  swap_area = rdma_buffer_alloc(
+      pd, client_metadata_attr.length /* what size to allocate */,
+      static_cast<ibv_access_flags>(
+          IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ |
+          IBV_ACCESS_REMOTE_WRITE) /* access permissions */);
+  if (!swap_area) {
+    ERROR("Server failed to allocate the necessary swap area");
     /* we assume that it is due to out of memory error */
     return -ENOMEM;
   }
   /* This buffer is used to transmit information about the above
    * buffer to the client. So this contains the metadata about the server
    * buffer. Hence this is called metadata buffer. Since this is already
-   * on allocated, we just register it.
-   * We need to prepare a send I/O operation that will tell the
-   * client the address of the server buffer.
+   * allocated, we just register it. We need to prepare a send I/O operation
+   * that will tell the client the address of the server buffer.
    */
-  server_metadata_attr.address = (uint64_t)server_buffer_mr->addr;
-  server_metadata_attr.length = (uint32_t)server_buffer_mr->length;
-  server_metadata_attr.stag.local_stag = (uint32_t)server_buffer_mr->lkey;
+  server_metadata_attr.address = (uint64_t)swap_area->addr;
+  server_metadata_attr.length = (uint32_t)swap_area->length;
+  server_metadata_attr.stag.local_stag = (uint32_t)swap_area->lkey;
   server_metadata_mr = rdma_buffer_register(
       pd /* which protection domain*/,
       &server_metadata_attr /* which memory to register */,
       sizeof(server_metadata_attr) /* what is the size of memory */,
       IBV_ACCESS_LOCAL_WRITE /* what access permission */);
   if (!server_metadata_mr) {
-    ERROR("Server failed to create to hold server metadata");
+    ERROR("Server couldn't allocate memory to send the client its metadata");
     /* we assume that this is due to out of memory error */
     return -ENOMEM;
   }
@@ -325,7 +323,7 @@ static int send_server_metadata_to_client() {
   server_send_sge.length = sizeof(server_metadata_attr);
   server_send_sge.lkey = server_metadata_mr->lkey;
   /* now we link this sge to the send request */
-  bzero(&server_send_wr, sizeof(server_send_wr));
+  memset(&server_send_wr, 0, sizeof(server_send_wr));
   server_send_wr.sg_list = &server_send_sge;
   server_send_wr.num_sge = 1;          // only 1 SGE element in the array
   server_send_wr.opcode = IBV_WR_SEND; // This is a send request
@@ -339,7 +337,7 @@ static int send_server_metadata_to_client() {
     return -errno;
   }
   /* We check for completion notification */
-  ret = process_work_completion_events(io_completion_channel, &wc, 1);
+  ret = await_work_completion_events(io_completion_channel, &wc, 1);
   if (ret != 1) {
     ERROR("Failed to send server metadata, ret = %d", ret);
     return ret;
@@ -359,11 +357,7 @@ static void cleanup() {
 
   // Client-specific resources (QP, CM ID, MRs)
   if (cm_client_id) {
-    // If QP was created (client_qp would be non-NULL and cm_client_id->qp would
-    // point to it) rdma_destroy_qp is often called on the cm_id that owns the
-    // QP. The original disconnect_and_cleanup calls
-    // rdma_destroy_qp(cm_client_id)
-    if (cm_client_id->qp) { // Check if the cm_id actually has a qp
+    if (cm_client_id->qp) {
       debug("Destroying QP associated with cm_client_id %p\n",
             (void *)cm_client_id);
       rdma_destroy_qp(cm_client_id);
@@ -381,10 +375,10 @@ static void cleanup() {
   client_qp = NULL;
 
   // Memory Regions
-  if (server_buffer_mr) {
-    debug("Freeing server_buffer_mr %p\n", (void *)server_buffer_mr);
-    rdma_buffer_free(server_buffer_mr);
-    server_buffer_mr = NULL;
+  if (swap_area) {
+    debug("Freeing swap area %p\n", (void *)server_buffer_mr);
+    rdma_buffer_free(swap_area);
+    swap_area = NULL;
   }
   if (server_metadata_mr) {
     debug("Deregistering server_metadata_mr %p\n", (void *)server_metadata_mr);
@@ -491,7 +485,7 @@ static int disconnect_and_cleanup() {
 
 void usage() {
   printf("Usage:\n");
-  printf("rdma_server: [-a <server_addr>] [-p <server_port>]\n");
+  printf("server [-a <server_addr>] [-p <server_port>]\n");
   printf("(default port is %d)\n", DEFAULT_RDMA_PORT);
   exit(1);
 }
@@ -499,7 +493,7 @@ void usage() {
 int main(int argc, char **argv) {
   int ret, option;
   struct sockaddr_in server_sockaddr;
-  bzero(&server_sockaddr, sizeof server_sockaddr);
+  memset(&server_sockaddr, 0, sizeof server_sockaddr);
   server_sockaddr.sin_family = AF_INET; /* standard IP NET address */
   server_sockaddr.sin_addr.s_addr = htonl(INADDR_ANY); /* passed address */
   /* Parse Command Line Arguments, not the most reliable code */

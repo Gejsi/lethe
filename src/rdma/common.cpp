@@ -29,9 +29,8 @@ void show_rdma_buffer_attr(struct rdma_buffer_attr *attr) {
   }
 
   printf("---------------------------------------------------------\n");
-  printf("buffer attr, addr: %p , len: %u , stag: 0x%x\n",
-         (void *)attr->address, (unsigned int)attr->length,
-         attr->stag.local_stag);
+  printf("buffer attr, addr: %p, len: %u, stag: 0x%x\n", (void *)attr->address,
+         (unsigned int)attr->length, attr->stag.local_stag);
   printf("---------------------------------------------------------\n");
 }
 
@@ -39,7 +38,7 @@ struct ibv_mr *rdma_buffer_alloc(struct ibv_pd *pd, uint32_t size,
                                  enum ibv_access_flags permission) {
   struct ibv_mr *mr = NULL;
   if (!pd) {
-    ERROR("Protection domain is NULL");
+    ERROR("No protection domain provided.");
     return NULL;
   }
   void *buf = calloc(1, size);
@@ -47,7 +46,7 @@ struct ibv_mr *rdma_buffer_alloc(struct ibv_pd *pd, uint32_t size,
     ERROR("Failed to allocate buffer, -ENOMEM");
     return NULL;
   }
-  debug("Buffer allocated: %p, len: %u \n", buf, size);
+  debug("Buffer allocated: %p, len: %u\n", buf, size);
   mr = rdma_buffer_register(pd, buf, size, permission);
   if (!mr) {
     free(buf);
@@ -71,12 +70,12 @@ struct ibv_mr *rdma_buffer_register(struct ibv_pd *pd, void *addr,
                                     enum ibv_access_flags permission) {
   struct ibv_mr *mr = NULL;
   if (!pd) {
-    ERROR("Protection domain is NULL, ignoring");
+    ERROR("No protection domain provided.");
     return NULL;
   }
   mr = ibv_reg_mr(pd, addr, length, permission);
   if (!mr) {
-    ERROR("Failed to create mr on buffer, errno: %d", -errno);
+    ERROR("Failed to register a memory region for %p, errno: %d", pd, -errno);
     return NULL;
   }
   debug("Registered: %p, len: %u, stag: 0x%x\n", mr->addr,
@@ -103,7 +102,7 @@ int process_rdma_cm_event(struct rdma_event_channel *echannel,
     ERROR("Failed to retrieve a cm event, errno: %d", -errno);
     return -errno;
   }
-  /* lets see, if it was a good event */
+  /* check if it's a good event */
   if ((*cm_event)->status != 0) {
     ERROR("CM event has non zero status: %d", (*cm_event)->status);
     ret = -((*cm_event)->status);
@@ -113,20 +112,20 @@ int process_rdma_cm_event(struct rdma_event_channel *echannel,
   }
   /* if it was a good event, was it of the expected type */
   if ((*cm_event)->event != expected_event) {
-    ERROR("Unexpected event received: %s [ expecting: %s ]",
+    ERROR("Unexpected event received: received %s, expected: %s",
           rdma_event_str((*cm_event)->event), rdma_event_str(expected_event));
     /* important, we acknowledge the event */
     rdma_ack_cm_event(*cm_event);
-    return -1; // unexpected event :(
+    return -1; // unexpected event
   }
-  debug("A new %s type event is received \n",
+  debug("A new %s type event is received\n",
         rdma_event_str((*cm_event)->event));
   /* The caller must acknowledge the event */
   return ret;
 }
 
-int process_work_completion_events(struct ibv_comp_channel *comp_channel,
-                                   struct ibv_wc *wc, int max_wc) {
+int await_work_completion_events(struct ibv_comp_channel *comp_channel,
+                                 struct ibv_wc *wc, int max_wc) {
   struct ibv_cq *cq_ptr = NULL;
   void *context = NULL;
   int ret = -1, i, total_wc = 0;
