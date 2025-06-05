@@ -23,7 +23,7 @@
 #define WARN(fmt, ...)                                                         \
   printf(CLR_WARN "[WARN]  " fmt CLR_RESET "\n", ##__VA_ARGS__)
 #define ERROR(fmt, ...)                                                        \
-  fprintf(stderr, CLR_ERROR "[ERROR] " fmt CLR_RESET "\n", ##__VA_ARGS__)
+  printf(CLR_ERROR "[ERROR] " fmt CLR_RESET "\n", ##__VA_ARGS__)
 
 #define PANIC(fmt, ...)                                                        \
   do {                                                                         \

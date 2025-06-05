@@ -260,7 +260,7 @@ static int accept_client_connection() {
   memcpy(&remote_sockaddr /* where to save */,
          rdma_get_peer_addr(cm_client_id) /* gives you remote sockaddr */,
          sizeof(struct sockaddr_in) /* max size */);
-  printf("A new connection is accepted from %s\n",
+  printf("A new connection is accepted at %s\n",
          inet_ntoa(remote_sockaddr.sin_addr));
   return ret;
 }
@@ -286,6 +286,7 @@ static int send_server_metadata_to_client() {
          client_metadata_attr.length);
   /* We need to setup requested memory buffer. This is where the client will
    * do RDMA READs and WRITEs. */
+  DEBUG("AAAAAAAAAAAAAAA %u", client_metadata_attr.length);
   swap_area = rdma_buffer_alloc(
       pd, client_metadata_attr.length /* what size to allocate */,
       static_cast<ibv_access_flags>(
@@ -532,17 +533,17 @@ int main(int argc, char **argv) {
   }
   ret = accept_client_connection();
   if (ret) {
-    ERROR("Failed to handle client cleanly, ret = %d ", ret);
+    ERROR("Failed to handle client cleanly, ret = %d", ret);
     goto cleanup_error;
   }
   ret = send_server_metadata_to_client();
   if (ret) {
-    ERROR("Failed to send server metadata to the client, ret = %d ", ret);
+    ERROR("Failed to send server metadata to the client, ret = %d", ret);
     goto cleanup_error;
   }
   ret = disconnect_and_cleanup();
   if (ret) {
-    ERROR("Failed to clean up resources properly, ret = %d ", ret);
+    ERROR("Failed to clean up resources properly, ret = %d", ret);
   }
 
   return ret;

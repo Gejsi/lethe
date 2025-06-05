@@ -50,7 +50,7 @@ endif()
 
 # Helper target that carries the shared link/include settings
 add_library(common INTERFACE)
-# Allow #include "foo.h" instead of #include "src/foo.h"
+# Allow `#include "foo.h"` instead of `#include "src/foo.h"`
 target_include_directories(common INTERFACE ${SRC})
 # Add VoliMem as a system include
 target_include_directories(common SYSTEM INTERFACE ${VOLIMEM_INCLUDE_DIR})
@@ -84,5 +84,5 @@ target_link_libraries(client PRIVATE common ${IBVERBS_LIBRARY} ${RDMACM_LIBRARY}
 
 # If no build type is specified (-DCMAKE_BUILD_TYPE=Release) default to Debug
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
-  set(CMAKE_BUILD_TYPE Release CACHE STRING "Choose build type: Debug, Release, RelWithDebInfo, MinSizeRel" FORCE)
+  set(CMAKE_BUILD_TYPE Debug CACHE STRING "Choose build type: Debug, Release, RelWithDebInfo, MinSizeRel" FORCE)
 endif()

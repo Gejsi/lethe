@@ -23,14 +23,16 @@
 #endif /* ACN_RDMA_DEBUG */
 
 /* Capacity of the completion queue (CQ) */
-#define CQ_CAPACITY (16)
+#define CQ_CAPACITY (1024)
 /*
  * An SGE (struct ibv_sge) describes a contiguous block of memory
  * with its address, length, and lkey.
  */
 #define MAX_SGE (2)
-/* MAX work requests */
-#define MAX_WR (8)
+/* MAX work requests.
+ * This limits the number of RDMA ops we can post before polling completions.
+ */
+#define MAX_WR (512)
 /* Default port where the RDMA server is listening */
 #define DEFAULT_RDMA_PORT (20886)
 

@@ -4,7 +4,6 @@
 #include <volimem/volimem.h>
 
 #include "common.h"
-#include "swapper.h"
 #include "utils.h"
 
 /* RDMA connection related resources */
@@ -300,16 +299,7 @@ static int exchange_metadata_with_server() {
 static int client_remote_memory_ops() {
   struct ibv_wc wc;
   int ret = -1;
-  client_dst_mr = rdma_buffer_register(
-      pd, dst, (uint32_t)strlen(src),
-      static_cast<ibv_access_flags>(IBV_ACCESS_LOCAL_WRITE |
-                                    IBV_ACCESS_REMOTE_WRITE |
-                                    IBV_ACCESS_REMOTE_READ));
-  if (!client_dst_mr) {
-    ERROR("We failed to create the destination buffer, -ENOMEM");
-    return -ENOMEM;
-  }
-  /* Step 1: is to copy the local buffer into the remote buffer. We will
+  /* Step 1: copy the local buffer into the remote buffer. We will
    * reuse the previous variables. */
   /* now we fill up SGE */
   client_send_sge.addr = (uint64_t)client_src_mr->addr;
@@ -333,11 +323,19 @@ static int client_remote_memory_ops() {
   /* at this point we are expecting 1 work completion for the write */
   ret = await_work_completion_events(io_completion_channel, &wc, 1);
   if (ret != 1) {
-    ERROR("We failed to get 1 work completions , ret = %d", ret);
+    ERROR("We failed to get 1 work completions, ret = %d", ret);
     return ret;
   }
   debug("Client side WRITE is complete\n");
   /* Now we prepare a READ using same variables but for destination */
+  client_dst_mr = rdma_buffer_register(
+      pd, dst, (uint32_t)strlen(src),
+      (ibv_access_flags)(IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE |
+                         IBV_ACCESS_REMOTE_READ));
+  if (!client_dst_mr) {
+    ERROR("We failed to create the destination buffer, -ENOMEM");
+    return -ENOMEM;
+  }
   client_send_sge.addr = (uint64_t)client_dst_mr->addr;
   client_send_sge.length = (uint32_t)client_dst_mr->length;
   client_send_sge.lkey = client_dst_mr->lkey;
@@ -363,6 +361,7 @@ static int client_remote_memory_ops() {
     ERROR("We failed to get 1 work completions , ret = %d ", ret);
     return ret;
   }
+
   debug("Client side READ is complete \n");
   return 0;
 }
@@ -439,10 +438,12 @@ void usage() {
 #define VOLIMEM 1
 
 void run(void *any) {
+  UNUSED(any);
+
 #if VOLIMEM
   printf("--- Inside VM ---\n\n");
   printf("Running on the vCPU apic %d\n", local_vcpu->lapic_id);
-  printf("Root page table is at %p\n", (page_table_t *)mapper_t::get_root());
+  printf("Root page table is at %p\n", (void *)mapper_t::get_root());
 #endif
 
   int ret;
@@ -517,29 +518,29 @@ int main(int argc, char **argv) {
   }
   ret = client_prepare_connection(&server_sockaddr);
   if (ret) {
-    ERROR("Failed to setup client connection, ret = %d ", ret);
+    ERROR("Failed to setup client connection, ret = %d", ret);
     return ret;
   }
 
   ret = client_pre_post_recv_buffer();
   if (ret) {
-    ERROR("Failed to setup client connection, ret = %d ", ret);
+    ERROR("Failed to setup client connection, ret = %d", ret);
     return ret;
   }
   ret = client_connect_to_server();
   if (ret) {
-    ERROR("Failed to setup client connection, ret = %d ", ret);
+    ERROR("Failed to setup client connection, ret = %d", ret);
     return ret;
   }
   ret = exchange_metadata_with_server();
   if (ret) {
-    ERROR("Failed to setup client connection, ret = %d ", ret);
+    ERROR("Failed to setup client connection, ret = %d", ret);
     return ret;
   }
 
 #if VOLIMEM
   constexpr s_volimem_config_t voli_config{
-      .log_level = INFO,
+      .log_level = DEBUG,
       .host_page_type = VOLIMEM_NORMAL_PAGES,
       .guest_page_type = VOLIMEM_NORMAL_PAGES,
   };

@@ -1,4 +1,5 @@
 #include <cstdio>
+#include <cstring>
 
 #include "common.h"
 #include "utils.h"
@@ -75,7 +76,8 @@ struct ibv_mr *rdma_buffer_register(struct ibv_pd *pd, void *addr,
   }
   mr = ibv_reg_mr(pd, addr, length, permission);
   if (!mr) {
-    ERROR("Failed to register a memory region for %p, errno: %d", pd, -errno);
+    ERROR("Failed to register a memory region for %p: %s", (void *)pd,
+          strerror(errno));
     return NULL;
   }
   debug("Registered: %p, len: %u, stag: 0x%x\n", mr->addr,
