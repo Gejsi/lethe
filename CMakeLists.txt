@@ -40,10 +40,10 @@ else()
 endif()
 
 # Find RDMA libraries
-find_library(IBVERBS_LIBRARY ibverbs HINTS "/home/atr/local/lib")
-find_library(RDMACM_LIBRARY rdmacm HINTS "/home/atr/local/lib")
+find_library(IBVERBS_LIBRARY ibverbs HINTS "/usr/lib" REQUIRED)
+find_library(RDMACM_LIBRARY rdmacm HINTS "/usr/lib" REQUIRED)
 if(IBVERBS_LIBRARY AND RDMACM_LIBRARY)
-  message(STATUS "Found RDMA libraries")
+  message(STATUS "Found RDMA libraries (${IBVERBS_LIBRARY}) (${RDMACM_LIBRARY})")
 else()
   message(FATAL_ERROR "RDMA libraries not found. Ensure they are installed correctly.")
 endif()
@@ -63,13 +63,14 @@ set(COMMON_SOURCES
 
 # Playground
 add_executable(playground
-  ${SRC}/playground.cpp
   ${COMMON_SOURCES}
+  ${SRC}/playground.cpp
 )
 target_link_libraries(playground PRIVATE common)
 
 # Server
 add_executable(server
+  ${COMMON_SOURCES}
   ${SRC}/rdma/common.cpp
   ${SRC}/rdma/server.cpp
 )
@@ -77,6 +78,7 @@ target_link_libraries(server PRIVATE common ${IBVERBS_LIBRARY} ${RDMACM_LIBRARY}
 
 # Client
 add_executable(client
+  ${COMMON_SOURCES}
   ${SRC}/rdma/common.cpp
   ${SRC}/rdma/client.cpp
 )

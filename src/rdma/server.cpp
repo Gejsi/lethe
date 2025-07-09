@@ -286,7 +286,6 @@ static int send_server_metadata_to_client() {
          client_metadata_attr.length);
   /* We need to setup requested memory buffer. This is where the client will
    * do RDMA READs and WRITEs. */
-  DEBUG("AAAAAAAAAAAAAAA %u", client_metadata_attr.length);
   swap_area = rdma_buffer_alloc(
       pd, client_metadata_attr.length /* what size to allocate */,
       static_cast<ibv_access_flags>(

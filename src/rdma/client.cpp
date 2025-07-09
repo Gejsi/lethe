@@ -182,7 +182,7 @@ static int client_pre_post_recv_buffer() {
                                             sizeof(server_metadata_attr),
                                             (IBV_ACCESS_LOCAL_WRITE));
   if (!server_metadata_mr) {
-    ERROR("Failed to setup the server metadata mr , -ENOMEM");
+    ERROR("Failed to setup the server metadata mr, -ENOMEM");
     return -ENOMEM;
   }
   server_recv_sge.addr = (uint64_t)server_metadata_mr->addr;
@@ -293,10 +293,10 @@ static int exchange_metadata_with_server() {
 
 /* This function does:
  * 1) Prepare memory buffers for RDMA operations
- * 1) RDMA write from src -> remote buffer
- * 2) RDMA read from remote buffer -> dst
+ * 1) RDMA WRITE from src -> remote buffer
+ * 2) RDMA READ from remote buffer -> dst
  */
-static int client_remote_memory_ops() {
+static int write_and_read() {
   struct ibv_wc wc;
   int ret = -1;
   /* Step 1: copy the local buffer into the remote buffer. We will
@@ -317,7 +317,7 @@ static int client_remote_memory_ops() {
   /* Now we post it */
   ret = ibv_post_send(client_qp, &client_send_wr, &bad_client_send_wr);
   if (ret) {
-    ERROR("Failed to write client src buffer, errno: %d ", -errno);
+    ERROR("Failed to write client src buffer, errno: %d", -errno);
     return -errno;
   }
   /* at this point we are expecting 1 work completion for the write */
@@ -447,7 +447,7 @@ void run(void *any) {
 #endif
 
   int ret;
-  ret = client_remote_memory_ops();
+  ret = write_and_read();
   if (ret) {
     ERROR("Failed to finish remote memory ops, ret = %d", ret);
   }
@@ -465,17 +465,16 @@ void run(void *any) {
 
 int main(int argc, char **argv) {
   struct sockaddr_in server_sockaddr;
-  int ret, option;
   memset(&server_sockaddr, 0, sizeof(server_sockaddr));
   server_sockaddr.sin_family = AF_INET;
   server_sockaddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
-  /* Parse Command Line Arguments */
+  int ret, option;
+  /* Parse command line arguments */
   while ((option = getopt(argc, argv, "s:a:p:")) != -1) {
     switch (option) {
     case 's':
-      printf("Passed string is: %s, with count %u \n", optarg,
-             (unsigned int)strlen(optarg));
+      printf("Passed string is: %s, with count %lu\n", optarg, strlen(optarg));
       src = (char *)calloc(strlen(optarg), 1);
       if (!src) {
         ERROR("Failed to allocate memory : -ENOMEM");

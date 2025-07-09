@@ -231,8 +231,8 @@ void handle_fault(void *fault_addr) {
   PANIC("No pages available to evict!");
 }
 
-void virtual_main(void *args) {
-  UNUSED(args);
+void virtual_main(void *any) {
+  UNUSED(any);
   printf("--- Inside VM ---\n\n");
 
   auto seg = new segment_t(HEAP_SIZE, HEAP_START);
@@ -247,7 +247,8 @@ void virtual_main(void *args) {
   // }
   for (usize i = 0; i < NUM_PAGES; i++) {
     auto vaddr = HEAP_START + i * PAGE_SIZE;
-    u8 tmp = *((u8 *)vaddr); // read to trigger a fault
+    // read to trigger a fault and cause swap-ins
+    u8 tmp = *((u8 *)vaddr);
     UNUSED(tmp);
   }
 
