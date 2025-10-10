@@ -23,32 +23,20 @@ void show_rdma_cmid(struct rdma_cm_id *id) {
          id->port_num);
 }
 
-void show_rdma_buffer_attr(struct rdma_buffer_attr *attr) {
-  if (!attr) {
-    ERROR("Passed attr is NULL");
-    return;
-  }
-
-  printf("---------------------------------------------------------\n");
-  printf("buffer attr, addr: %p, len: %u, stag: 0x%x\n", (void *)attr->address,
-         (unsigned int)attr->length, attr->stag.local_stag);
-  printf("---------------------------------------------------------\n");
-}
-
-struct ibv_mr *rdma_buffer_alloc(struct ibv_pd *pd, uint32_t size,
+struct ibv_mr *rdma_buffer_alloc(struct ibv_pd *pd, usize alignment, usize size,
                                  enum ibv_access_flags permission) {
   struct ibv_mr *mr = NULL;
   if (!pd) {
     ERROR("No protection domain provided.");
     return NULL;
   }
-  void *buf = calloc(1, size);
+  void *buf = aligned_alloc(alignment, size);
   if (!buf) {
     ERROR("Failed to allocate buffer, -ENOMEM");
     return NULL;
   }
   debug("Buffer allocated: %p, len: %u\n", buf, size);
-  mr = rdma_buffer_register(pd, buf, size, permission);
+  mr = rdma_buffer_register(pd, buf, (u32)size, permission);
   if (!mr) {
     free(buf);
   }
@@ -164,7 +152,6 @@ int await_work_completion_events(struct ibv_comp_channel *comp_channel,
     }
     total_wc += ret;
   } while (total_wc < max_wc);
-  debug("%d WC are completed \n", total_wc);
   /* Now we check validity and status of I/O work completions */
   for (i = 0; i < total_wc; i++) {
     if (wc[i].status != IBV_WC_SUCCESS) {

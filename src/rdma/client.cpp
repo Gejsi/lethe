@@ -4,6 +4,7 @@
 #include <volimem/volimem.h>
 
 #include "common.h"
+#include "swapper.h"
 #include "utils.h"
 
 /* RDMA connection related resources */
@@ -23,23 +24,18 @@ static struct ibv_qp *client_qp; // queue pair
 // This information (often called "buffer attributes" or "metadata") is
 // typically exchanged using SEND/RECV operations after the connection is
 // established.
-static struct ibv_mr *client_metadata_mr = NULL, *client_src_mr = NULL,
-                     *client_dst_mr = NULL, *server_metadata_mr = NULL;
-static struct rdma_buffer_attr client_metadata_attr, server_metadata_attr;
-static struct ibv_send_wr client_send_wr, *bad_client_send_wr = NULL;
+static struct ibv_mr *server_metadata_mr = NULL;
+static struct rdma_buffer_attr server_metadata_attr;
 static struct ibv_recv_wr server_recv_wr, *bad_server_recv_wr = NULL;
-static struct ibv_sge client_send_sge, server_recv_sge;
-/* Source and Destination buffers, where RDMA operations source and sink */
-static char *src = NULL, *dst = NULL;
+static struct ibv_sge server_recv_sge;
+/* the cache where RDMA operations source and sink */
+static struct ibv_mr *cache_area = NULL;
 
-/* This is our testing function */
-static int check_src_dst() {
-  return memcmp((void *)src, (void *)dst, strlen(src));
-}
+Page *pages;
 
 /* This function prepares client side connection resources for an RDMA
  * connection */
-static int client_prepare_connection(struct sockaddr_in *s_addr) {
+static int prepare_connection(struct sockaddr_in *s_addr) {
   struct rdma_cm_event *cm_event = NULL;
   int ret = -1;
 
@@ -47,11 +43,10 @@ static int client_prepare_connection(struct sockaddr_in *s_addr) {
   cm_event_channel = rdma_create_event_channel();
 
   if (!cm_event_channel) {
-    ERROR("Creating cm event channel failed, errno: %d ", -errno);
+    ERROR("Creating cm event channel failed, errno: %d", -errno);
     return -errno;
   }
 
-  debug("RDMA CM event channel is created at : %p \n", cm_event_channel);
   /* rdma_cm_id is the connection identifier (like socket) which is used
    * to define an RDMA connection.
    */
@@ -68,7 +63,6 @@ static int client_prepare_connection(struct sockaddr_in *s_addr) {
     ERROR("Failed to resolve address, errno: %d", -errno);
     return -errno;
   }
-  debug("waiting for cm event: RDMA_CM_EVENT_ADDR_RESOLVED\n");
   ret = process_rdma_cm_event(cm_event_channel, RDMA_CM_EVENT_ADDR_RESOLVED,
                               &cm_event);
   if (ret) {
@@ -81,7 +75,6 @@ static int client_prepare_connection(struct sockaddr_in *s_addr) {
     ERROR("Failed to acknowledge the CM event, errno: %d", -errno);
     return -errno;
   }
-  debug("RDMA address is resolved \n");
 
   /* Resolves an RDMA route to the destination address in order to
    * establish a connection */
@@ -90,7 +83,6 @@ static int client_prepare_connection(struct sockaddr_in *s_addr) {
     ERROR("Failed to resolve route, erno: %d ", -errno);
     return -errno;
   }
-  debug("waiting for cm event: RDMA_CM_EVENT_ROUTE_RESOLVED\n");
   ret = process_rdma_cm_event(cm_event_channel, RDMA_CM_EVENT_ROUTE_RESOLVED,
                               &cm_event);
   if (ret) {
@@ -103,8 +95,8 @@ static int client_prepare_connection(struct sockaddr_in *s_addr) {
     ERROR("Failed to acknowledge the CM event, errno: %d ", -errno);
     return -errno;
   }
-  printf("Trying to connect to server at: %s port: %d \n",
-         inet_ntoa(s_addr->sin_addr), ntohs(s_addr->sin_port));
+  INFO("Trying to connect to server at: %s port: %d",
+       inet_ntoa(s_addr->sin_addr), ntohs(s_addr->sin_port));
   /* Protection Domain (PD) is similar to a "process abstraction"
    * in the operating system. All resources are tied to a particular PD.
    * And accessing recourses across PD will result in a protection fault.
@@ -114,7 +106,6 @@ static int client_prepare_connection(struct sockaddr_in *s_addr) {
     ERROR("Failed to alloc pd, errno: %d ", -errno);
     return -errno;
   }
-  debug("pd allocated at %p \n", pd);
   /* Now we need a completion channel, were the I/O completion
    * notifications are sent. Remember, this is different from connection
    * management (CM) event notifications.
@@ -126,7 +117,6 @@ static int client_prepare_connection(struct sockaddr_in *s_addr) {
     ERROR("Failed to create IO completion event channel, errno: %d", -errno);
     return -errno;
   }
-  debug("completion event channel created at : %p \n", io_completion_channel);
   /* Now we create a completion queue (CQ) where actual I/O
    * completion metadata is placed. The metadata is packed into a structure
    * called struct ibv_wc (wc = work completion). ibv_wc has detailed
@@ -142,7 +132,6 @@ static int client_prepare_connection(struct sockaddr_in *s_addr) {
     ERROR("Failed to create CQ, errno: %d ", -errno);
     return -errno;
   }
-  debug("CQ created at %p with %d elements \n", client_cq, client_cq->cqe);
   ret = ibv_req_notify_cq(client_cq, 0);
   if (ret) {
     ERROR("Failed to request notifications, errno: %d", -errno);
@@ -171,12 +160,11 @@ static int client_prepare_connection(struct sockaddr_in *s_addr) {
     return -errno;
   }
   client_qp = cm_client_id->qp;
-  debug("QP created at %p \n", client_qp);
   return 0;
 }
 
-/* Pre-posts a receive buffer before calling rdma_connect () */
-static int client_pre_post_recv_buffer() {
+/* Pre-posts a receive buffer before calling rdma_connect() */
+static int pre_post_recv_buffer() {
   int ret = -1;
   server_metadata_mr = rdma_buffer_register(pd, &server_metadata_attr,
                                             sizeof(server_metadata_attr),
@@ -199,12 +187,14 @@ static int client_pre_post_recv_buffer() {
     ERROR("Failed to pre-post the receive buffer, errno: %d", ret);
     return ret;
   }
-  debug("Receive buffer pre-posting is successful\n");
+
+  DEBUG("Allocated buffer to receive server metadata");
+
   return 0;
 }
 
 /* Connects to the RDMA server */
-static int client_connect_to_server() {
+static int connect_to_server() {
   struct rdma_conn_param conn_param;
   struct rdma_cm_event *cm_event = NULL;
   int ret = -1;
@@ -217,7 +207,6 @@ static int client_connect_to_server() {
     ERROR("Failed to connect to remote host , errno: %d", -errno);
     return -errno;
   }
-  debug("waiting for cm event: RDMA_CM_EVENT_ESTABLISHED\n");
   ret = process_rdma_cm_event(cm_event_channel, RDMA_CM_EVENT_ESTABLISHED,
                               &cm_event);
   if (ret) {
@@ -229,147 +218,65 @@ static int client_connect_to_server() {
     ERROR("Failed to acknowledge cm event, errno: %d", -errno);
     return -errno;
   }
-  printf("The client is connected successfully \n");
+  INFO("The client is connected successfully");
   return 0;
 }
 
-/* Exchange buffer metadata with the server. The client sends its, and then
- * receives from the server. The client-side metadata on the server is _not_
- * used because this program is client driven. But it shown here how to do it
- * for the illustration purposes
+/**
+ * @brief Allocates the client-side resources required for the swapper.
+ *
+ * This includes the cache and the page metadata array.
+ * This should be called after the Protection Domain (pd) is available.
+ * @return 0 on success, -1 on failure.
  */
-static int exchange_metadata_with_server() {
-  struct ibv_wc wc[2];
-  int ret = -1;
-  client_src_mr =
-      rdma_buffer_register(pd, src, (uint32_t)strlen(src),
-                           static_cast<ibv_access_flags>(
-                               IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ |
-                               IBV_ACCESS_REMOTE_WRITE));
-  if (!client_src_mr) {
-    ERROR("Failed to register the first buffer, ret = %d ", ret);
-    return ret;
+static int cache_alloc() {
+  cache_area =
+      rdma_buffer_alloc(pd, PAGE_SIZE, PAGE_SIZE,
+                        static_cast<ibv_access_flags>(IBV_ACCESS_LOCAL_WRITE |
+                                                      IBV_ACCESS_REMOTE_READ |
+                                                      IBV_ACCESS_REMOTE_WRITE));
+
+  if (!cache_area) {
+    ERROR("Failed to allocate and register the cache_area");
+    return -1;
   }
-  /* we prepare metadata for the first buffer */
-  client_metadata_attr.address = (uint64_t)client_src_mr->addr;
-  client_metadata_attr.length = (uint32_t)client_src_mr->length;
-  client_metadata_attr.stag.local_stag = client_src_mr->lkey;
-  /* now we register the metadata memory */
-  client_metadata_mr = rdma_buffer_register(pd, &client_metadata_attr,
-                                            sizeof(client_metadata_attr),
-                                            IBV_ACCESS_LOCAL_WRITE);
-  if (!client_metadata_mr) {
-    ERROR("Failed to register the client metadata buffer, ret = %d ", ret);
-    return ret;
-  }
-  /* now we fill up SGE */
-  client_send_sge.addr = (uint64_t)client_metadata_mr->addr;
-  client_send_sge.length = (uint32_t)client_metadata_mr->length;
-  client_send_sge.lkey = client_metadata_mr->lkey;
-  /* now we link to the send work request */
-  memset(&client_send_wr, 0, sizeof(client_send_wr));
-  client_send_wr.sg_list = &client_send_sge;
-  client_send_wr.num_sge = 1;
-  client_send_wr.opcode = IBV_WR_SEND;
-  client_send_wr.send_flags = IBV_SEND_SIGNALED;
-  /* Now we post it */
-  ret = ibv_post_send(client_qp, &client_send_wr, &bad_client_send_wr);
-  if (ret) {
-    ERROR("Failed to send client metadata, errno: %d ", -errno);
-    return -errno;
-  }
-  /* at this point we are expecting 2 work completion. One for our
-   * send and one for recv that we will get from the server for
-   * its buffer information */
-  ret = await_work_completion_events(io_completion_channel, wc, 2);
-  if (ret != 2) {
-    ERROR("We failed to get 2 work completions , ret = %d ", ret);
-    return ret;
-  }
-  debug("Server sent us its buffer location and credentials, showing \n");
-  show_rdma_buffer_attr(&server_metadata_attr);
+
+  pages = new Page[1];
+
+  INFO("Cache allocated at %p and registered.", cache_area->addr);
   return 0;
 }
 
-/* This function does:
- * 1) Prepare memory buffers for RDMA operations
- * 1) RDMA WRITE from src -> remote buffer
- * 2) RDMA READ from remote buffer -> dst
+/**
+ * @brief Waits to receive the server's swap area metadata.
+ *
+ * This function assumes that a receive buffer has already been pre-posted.
+ * It blocks until the server's metadata arrives.
+ * @return 0 on success, error code on failure.
  */
-static int write_and_read() {
+static int receive_server_metadata() {
   struct ibv_wc wc;
   int ret = -1;
-  /* Step 1: copy the local buffer into the remote buffer. We will
-   * reuse the previous variables. */
-  /* now we fill up SGE */
-  client_send_sge.addr = (uint64_t)client_src_mr->addr;
-  client_send_sge.length = (uint32_t)client_src_mr->length;
-  client_send_sge.lkey = client_src_mr->lkey;
-  /* now we link to the send work request */
-  memset(&client_send_wr, 0, sizeof(client_send_wr));
-  client_send_wr.sg_list = &client_send_sge;
-  client_send_wr.num_sge = 1;
-  client_send_wr.opcode = IBV_WR_RDMA_WRITE;
-  client_send_wr.send_flags = IBV_SEND_SIGNALED;
-  /* we have to tell server side info for RDMA */
-  client_send_wr.wr.rdma.rkey = server_metadata_attr.stag.remote_stag;
-  client_send_wr.wr.rdma.remote_addr = server_metadata_attr.address;
-  /* Now we post it */
-  ret = ibv_post_send(client_qp, &client_send_wr, &bad_client_send_wr);
-  if (ret) {
-    ERROR("Failed to write client src buffer, errno: %d", -errno);
-    return -errno;
-  }
-  /* at this point we are expecting 1 work completion for the write */
+
+  // expect one completion: the reception of the server's metadata.
   ret = await_work_completion_events(io_completion_channel, &wc, 1);
   if (ret != 1) {
-    ERROR("We failed to get 1 work completions, ret = %d", ret);
-    return ret;
-  }
-  debug("Client side WRITE is complete\n");
-  /* Now we prepare a READ using same variables but for destination */
-  client_dst_mr = rdma_buffer_register(
-      pd, dst, (uint32_t)strlen(src),
-      (ibv_access_flags)(IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE |
-                         IBV_ACCESS_REMOTE_READ));
-  if (!client_dst_mr) {
-    ERROR("We failed to create the destination buffer, -ENOMEM");
-    return -ENOMEM;
-  }
-  client_send_sge.addr = (uint64_t)client_dst_mr->addr;
-  client_send_sge.length = (uint32_t)client_dst_mr->length;
-  client_send_sge.lkey = client_dst_mr->lkey;
-  /* now we link to the send work request */
-  memset(&client_send_wr, 0, sizeof(client_send_wr));
-  client_send_wr.sg_list = &client_send_sge;
-  client_send_wr.num_sge = 1;
-  client_send_wr.opcode = IBV_WR_RDMA_READ;
-  client_send_wr.send_flags = IBV_SEND_SIGNALED;
-  /* we have to tell server side info for RDMA */
-  client_send_wr.wr.rdma.rkey = server_metadata_attr.stag.remote_stag;
-  client_send_wr.wr.rdma.remote_addr = server_metadata_attr.address;
-  /* Now we post it */
-  ret = ibv_post_send(client_qp, &client_send_wr, &bad_client_send_wr);
-  if (ret) {
-    ERROR("Failed to read client dst buffer from the master, errno: %d ",
-          -errno);
-    return -errno;
-  }
-  /* at this point we are expecting 1 work completion for the write */
-  ret = await_work_completion_events(io_completion_channel, &wc, 1);
-  if (ret != 1) {
-    ERROR("We failed to get 1 work completions , ret = %d ", ret);
+    ERROR("Failed to receive server metadata, ret = %d", ret);
     return ret;
   }
 
-  debug("Client side READ is complete \n");
+  DEBUG("Server's swap area metadata received. addr: %p, len: %u, stag: 0x%x",
+        (void *)server_metadata_attr.address,
+        (unsigned int)server_metadata_attr.length,
+        server_metadata_attr.stag.local_stag);
+
   return 0;
 }
 
 /* This function disconnects the RDMA connection from the server and cleans up
  * all the resources.
  */
-static int client_disconnect_and_clean() {
+static int disconnect_and_cleanup() {
   struct rdma_cm_event *cm_event = NULL;
   int ret = -1;
   /* active disconnect from the client side */
@@ -409,14 +316,25 @@ static int client_disconnect_and_clean() {
     ERROR("Failed to destroy completion channel cleanly, %d ", -errno);
     // we continue anyways;
   }
-  /* Destroy memory buffers */
-  rdma_buffer_deregister(server_metadata_mr);
-  rdma_buffer_deregister(client_metadata_mr);
-  rdma_buffer_deregister(client_src_mr);
-  rdma_buffer_deregister(client_dst_mr);
-  /* We free the buffers */
-  free(src);
-  free(dst);
+
+  // Free the cache and its RDMA registered area
+  if (cache_area) {
+    rdma_buffer_free(cache_area);
+    cache_area = NULL;
+  }
+
+  // Deregister the memory region we used to receive the server's metadata
+  if (server_metadata_mr) {
+    rdma_buffer_deregister(server_metadata_mr);
+    server_metadata_mr = NULL;
+  }
+
+  // Free the page metadata array
+  if (pages) {
+    delete[] pages;
+    pages = NULL;
+  }
+
   /* Destroy protection domain */
   ret = ibv_dealloc_pd(pd);
   if (ret) {
@@ -424,43 +342,27 @@ static int client_disconnect_and_clean() {
     // we continue anyways;
   }
   rdma_destroy_event_channel(cm_event_channel);
-  printf("Client resource clean up is complete \n");
+
+  INFO("Client shut-down is complete.");
   return 0;
 }
 
 void usage() {
   printf("Usage:\n");
-  printf("client [-a <server_addr>] [-p <server_port>] -s <string>\n");
+  printf("client [-a <server_addr>] [-p <server_port>]\n");
   printf("(default port: %d)\n", DEFAULT_RDMA_PORT);
   exit(1);
 }
 
-#define VOLIMEM 1
-
-void run(void *any) {
+void virtual_main(void *any) {
   UNUSED(any);
 
-#if VOLIMEM
-  printf("--- Inside VM ---\n\n");
-  printf("Running on the vCPU apic %d\n", local_vcpu->lapic_id);
-  printf("Root page table is at %p\n", (void *)mapper_t::get_root());
-#endif
+  DEBUG("--- Inside VM ---");
 
-  int ret;
-  ret = write_and_read();
-  if (ret) {
-    ERROR("Failed to finish remote memory ops, ret = %d", ret);
-  }
+  DEBUG("Running on the vCPU apic %d", local_vcpu->lapic_id);
+  DEBUG("Root page table is at %p", (void *)mapper_t::get_root());
 
-  if (check_src_dst()) {
-    ERROR("src and dst buffers do not match");
-  } else {
-    printf("SUCCESS, source and destination buffers match\n");
-  }
-
-#if VOLIMEM
-  printf("\n--- Exiting VM ---\n");
-#endif
+  DEBUG("--- Exiting VM ---");
 }
 
 int main(int argc, char **argv) {
@@ -470,27 +372,10 @@ int main(int argc, char **argv) {
   server_sockaddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
   int ret, option;
-  /* Parse command line arguments */
-  while ((option = getopt(argc, argv, "s:a:p:")) != -1) {
+  while ((option = getopt(argc, argv, "a:p:")) != -1) {
     switch (option) {
-    case 's':
-      printf("Passed string is: %s, with count %lu\n", optarg, strlen(optarg));
-      src = (char *)calloc(strlen(optarg), 1);
-      if (!src) {
-        ERROR("Failed to allocate memory : -ENOMEM");
-        return -ENOMEM;
-      }
-      /* Copy the passes arguments */
-      strncpy(src, optarg, strlen(optarg));
-      dst = (char *)calloc(strlen(optarg), 1);
-      if (!dst) {
-        ERROR("Failed to allocate destination memory, -ENOMEM");
-        free(src);
-        return -ENOMEM;
-      }
-      break;
     case 'a':
-      /* remember, this overwrites the port info */
+      /* overwrites the port info */
       ret = get_addr(optarg, (struct sockaddr *)&server_sockaddr);
       if (ret) {
         ERROR("Invalid IP");
@@ -511,33 +396,36 @@ int main(int argc, char **argv) {
     server_sockaddr.sin_port = htons(DEFAULT_RDMA_PORT);
   }
 
-  if (src == NULL) {
-    printf("Please provide a string to copy \n");
-    usage();
-  }
-  ret = client_prepare_connection(&server_sockaddr);
+  ret = prepare_connection(&server_sockaddr);
   if (ret) {
     ERROR("Failed to setup client connection, ret = %d", ret);
     return ret;
   }
 
-  ret = client_pre_post_recv_buffer();
-  if (ret) {
-    ERROR("Failed to setup client connection, ret = %d", ret);
-    return ret;
-  }
-  ret = client_connect_to_server();
-  if (ret) {
-    ERROR("Failed to setup client connection, ret = %d", ret);
-    return ret;
-  }
-  ret = exchange_metadata_with_server();
+  ret = cache_alloc();
   if (ret) {
     ERROR("Failed to setup client connection, ret = %d", ret);
     return ret;
   }
 
-#if VOLIMEM
+  ret = pre_post_recv_buffer();
+  if (ret) {
+    ERROR("Failed to setup client connection, ret = %d", ret);
+    return ret;
+  }
+
+  ret = connect_to_server();
+  if (ret) {
+    ERROR("Failed to setup client connection, ret = %d", ret);
+    return ret;
+  }
+
+  ret = receive_server_metadata();
+  if (ret) {
+    ERROR("Failed to setup client connection, ret = %d", ret);
+    return ret;
+  }
+
   constexpr s_volimem_config_t voli_config{
       .log_level = DEBUG,
       .host_page_type = VOLIMEM_NORMAL_PAGES,
@@ -545,12 +433,9 @@ int main(int argc, char **argv) {
   };
 
   volimem_set_config(&voli_config);
-  volimem_start(nullptr, run);
-#else
-  run(nullptr);
-#endif
+  volimem_start(nullptr, virtual_main);
 
-  ret = client_disconnect_and_clean();
+  ret = disconnect_and_cleanup();
   if (ret) {
     ERROR("Failed to cleanly disconnect and clean up resources ");
   }

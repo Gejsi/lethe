@@ -19,9 +19,9 @@
 #define DEBUG(fmt, ...)                                                        \
   printf(CLR_DEBUG "[DEBUG] " fmt CLR_RESET "\n", ##__VA_ARGS__)
 #define INFO(fmt, ...)                                                         \
-  printf(CLR_INFO "[INFO]  " fmt CLR_RESET "\n", ##__VA_ARGS__)
+  printf(CLR_INFO "[INFO] " fmt CLR_RESET "\n", ##__VA_ARGS__)
 #define WARN(fmt, ...)                                                         \
-  printf(CLR_WARN "[WARN]  " fmt CLR_RESET "\n", ##__VA_ARGS__)
+  printf(CLR_WARN "[WARN] " fmt CLR_RESET "\n", ##__VA_ARGS__)
 #define ERROR(fmt, ...)                                                        \
   printf(CLR_ERROR "[ERROR] " fmt CLR_RESET "\n", ##__VA_ARGS__)
 

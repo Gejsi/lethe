@@ -26,5 +26,7 @@ build/bin/server
 
 Client
 ```bash
-build/bin/client -a 10.0.0.1 -s foo
+build/bin/client
+# optionally specify address and port
+build/bin/client -a 10.0.0.1 -p 20000
 ```

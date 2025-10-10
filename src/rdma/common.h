@@ -1,5 +1,6 @@
 #pragma once
 
+#include "utils.h"
 #include <arpa/inet.h>
 #include <cstdio>
 #include <getopt.h>
@@ -55,9 +56,6 @@ struct __attribute((packed)) rdma_buffer_attr {
 /* resolves a given destination name to sin_addr */
 int get_addr(char *dst, struct sockaddr *addr);
 
-/* prints RDMA buffer info structure */
-void show_rdma_buffer_attr(struct rdma_buffer_attr *attr);
-
 /*
  * Processes an RDMA connection management (CM) event.
  * @echannel: CM event channel where the event is expected.
@@ -76,7 +74,7 @@ int process_rdma_cm_event(struct rdma_event_channel *echannel,
  * @permission: OR of IBV_ACCESS_* permissions as defined for the enum
  * ibv_access_flags
  */
-struct ibv_mr *rdma_buffer_alloc(struct ibv_pd *pd, uint32_t length,
+struct ibv_mr *rdma_buffer_alloc(struct ibv_pd *pd, usize alignment, usize size,
                                  enum ibv_access_flags permission);
 
 /* Frees a previously allocated RDMA buffer. The buffer must be allocated by

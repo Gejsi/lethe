@@ -32,7 +32,9 @@ find_library(VOLIMEM_LIBRARY
              HINTS "${VOLIMEM_ROOT_DIR}/build/lib" 
              REQUIRED) 
 if(VOLIMEM_INCLUDE_DIR AND VOLIMEM_LIBRARY)
-  message(STATUS "Found VoliMem library and include directory (${VOLIMEM_INCLUDE_DIR})")
+  message(STATUS "Found VoliMem library and include directory:")
+  message(STATUS "\tLibrary: ${VOLIMEM_LIBRARY}")
+  message(STATUS "\tInclude: ${VOLIMEM_INCLUDE_DIR}")
 else()
   message(FATAL_ERROR "VoliMem include directory or library not found. "
                       "Searched in ${VOLIMEM_ROOT_DIR}. "
@@ -43,7 +45,9 @@ endif()
 find_library(IBVERBS_LIBRARY ibverbs HINTS "/usr/lib" REQUIRED)
 find_library(RDMACM_LIBRARY rdmacm HINTS "/usr/lib" REQUIRED)
 if(IBVERBS_LIBRARY AND RDMACM_LIBRARY)
-  message(STATUS "Found RDMA libraries (${IBVERBS_LIBRARY}) (${RDMACM_LIBRARY})")
+  message(STATUS "Found RDMA libraries:")
+  message(STATUS "\tibverbs: ${IBVERBS_LIBRARY}")
+  message(STATUS "\trdmacm: ${RDMACM_LIBRARY}")
 else()
   message(FATAL_ERROR "RDMA libraries not found. Ensure they are installed correctly.")
 endif()

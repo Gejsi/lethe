@@ -9,3 +9,4 @@
 
 .clangd
 .cache/
+.vscode/

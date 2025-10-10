@@ -79,7 +79,7 @@ void set_permissions(uptr vaddr, uptr flags, bool flush = true) {
   }
 }
 
-usize retrieve_rr_page() {
+usize get_rr_page() {
   static usize next_idx = 0;
   usize idx = next_idx;
   next_idx = (next_idx + 1) % NUM_PAGES;
@@ -118,7 +118,7 @@ void demote() {
 }
 
 // O(1)
-std::optional<usize> retrieve_free_page() {
+std::optional<usize> get_free_page() {
   if (free_pages.empty()) {
     DEBUG("No free cache slots available");
     return std::nullopt;
@@ -194,7 +194,7 @@ void handle_fault(void *fault_addr) {
   DEBUG("Inside fault handler: %p", fault_addr);
   auto aligned_fault_vaddr = (uptr)fault_addr & ~(PAGE_SIZE - 1);
 
-  if (auto free_idx = retrieve_free_page()) {
+  if (auto free_idx = get_free_page()) {
     swap_in_page(*free_idx, aligned_fault_vaddr);
     return;
   }
