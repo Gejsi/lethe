@@ -359,7 +359,7 @@ void virtual_main(void *any) {
 
   DEBUG("--- Inside VM ---");
 
-  DEBUG("Running on the vCPU apic %d", local_vcpu->lapic_id);
+  DEBUG("Running on the vCPU apic %lu", local_vcpu->lapic_id);
   DEBUG("Root page table is at %p", (void *)mapper_t::get_root());
 
   DEBUG("--- Exiting VM ---");
@@ -430,7 +430,7 @@ int main(int argc, char **argv) {
       .log_level = DEBUG,
       .host_page_type = VOLIMEM_NORMAL_PAGES,
       .guest_page_type = VOLIMEM_NORMAL_PAGES,
-  };
+      .print_kvm_stats = false};
 
   volimem_set_config(&voli_config);
   volimem_start(nullptr, virtual_main);

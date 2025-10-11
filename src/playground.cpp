@@ -190,8 +190,8 @@ void swap_in_page(usize target_idx, uptr aligned_fault_vaddr) {
   }
 }
 
-void handle_fault(void *fault_addr) {
-  DEBUG("Inside fault handler: %p", fault_addr);
+void handle_fault(void *fault_addr, regstate_t *regstate) {
+  DEBUG("Handling fault at %p (%lu)", fault_addr, regstate->error_code);
   auto aligned_fault_vaddr = (uptr)fault_addr & ~(PAGE_SIZE - 1);
 
   if (auto free_idx = get_free_page()) {
@@ -279,7 +279,7 @@ int main() {
       .log_level = INFO,
       .host_page_type = VOLIMEM_NORMAL_PAGES,
       .guest_page_type = VOLIMEM_NORMAL_PAGES,
-  };
+      .print_kvm_stats = false};
 
   // std::thread t([] { std::cout << "Hello from a thread!\n"; });
   // t.join();

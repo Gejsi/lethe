@@ -77,13 +77,11 @@ constexpr usize KB = 1024;
 constexpr usize MB = KB * KB;
 constexpr usize GB = MB * KB;
 
-constexpr inline const char *bool_to_str(bool b) {
+constexpr const char *bool_to_str(bool b) noexcept {
   return b ? "true" : "false";
 }
 
-inline void sleep_ms(usize ms) {
-  std::this_thread::sleep_for(Milliseconds(ms));
-}
+void sleep_ms(usize ms);
 
 bool pte_is_present(uptr pte);
 bool pte_is_writable(uptr pte);

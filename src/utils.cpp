@@ -2,6 +2,8 @@
 
 #include "utils.h"
 
+void sleep_ms(usize ms) { std::this_thread::sleep_for(Milliseconds(ms)); }
+
 bool pte_is_present(uptr pte) { return pte & PTE_P; }
 bool pte_is_writable(uptr pte) { return pte & PTE_W; }
 bool pte_is_accessed(uptr pte) { return pte & PTE_A; }
