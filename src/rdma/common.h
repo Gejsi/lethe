@@ -34,8 +34,10 @@
  * This limits the number of RDMA ops we can post before polling completions.
  */
 #define MAX_WR (512)
-/* Default port where the RDMA server is listening */
-#define DEFAULT_RDMA_PORT (20886)
+
+/* Default address and port where the RDMA server is listening */
+constexpr const char *DEFAULT_SERVER_ADDR = "10.0.0.1";
+constexpr u16 DEFAULT_RDMA_PORT = 20886;
 
 /*
  * Use this structure to exchange information between the server

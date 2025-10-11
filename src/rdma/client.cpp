@@ -369,21 +369,28 @@ int main(int argc, char **argv) {
   struct sockaddr_in server_sockaddr;
   memset(&server_sockaddr, 0, sizeof(server_sockaddr));
   server_sockaddr.sin_family = AF_INET;
-  server_sockaddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
-  int ret, option;
+  int ret;
+  ret = inet_pton(AF_INET, DEFAULT_SERVER_ADDR, &server_sockaddr.sin_addr);
+  if (ret <= 0) {
+    if (ret == 0)
+      ERROR("Invalid address string: %s", DEFAULT_SERVER_ADDR);
+    else
+      perror("inet_pton");
+    return -1;
+  }
+
+  int option;
   while ((option = getopt(argc, argv, "a:p:")) != -1) {
     switch (option) {
     case 'a':
-      /* overwrites the port info */
       ret = get_addr(optarg, (struct sockaddr *)&server_sockaddr);
       if (ret) {
-        ERROR("Invalid IP");
+        ERROR("Invalid address provided");
         return ret;
       }
       break;
     case 'p':
-      /* passed port to listen on */
       server_sockaddr.sin_port = htons((uint16_t)strtol(optarg, NULL, 0));
       break;
     default:
@@ -391,8 +398,8 @@ int main(int argc, char **argv) {
       break;
     }
   }
+
   if (!server_sockaddr.sin_port) {
-    /* no port provided, use the default port */
     server_sockaddr.sin_port = htons(DEFAULT_RDMA_PORT);
   }
 
