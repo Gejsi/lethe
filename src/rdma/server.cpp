@@ -302,7 +302,7 @@ static int send_server_metadata_to_client() {
 /**
  * @brief Initializes the swap area with test data.
  */
-static void initialize_swap_area_for_test() {
+static void init_swap_area_for_test() {
   u32 *page = (u32 *)(swap_area->addr);
   size_t num_words = PAGE_SIZE / sizeof(u32);
   for (size_t i = 0; i < num_words; i++) {
@@ -312,13 +312,31 @@ static void initialize_swap_area_for_test() {
   INFO("Swap area initialized: first page filled with 0xDEADBEEF");
 }
 
+/**
+ * @brief Verifies the client wrote in the swap area.
+ */
+static void verify_swap_area_after_write() {
+  u32 *page = (u32 *)(swap_area->addr);
+  u32 first_word = page[0];
+
+  INFO("First word in swap area: 0x%x", first_word);
+
+  if (first_word == 0xCAFEBABE) {
+    INFO("✓ SERVER VERIFICATION PASSED! Client successfully wrote 0xCAFEBABE");
+  } else if (first_word == 0xDEADBEEF) {
+    ERROR("✗ SERVER VERIFICATION FAILED! Still shows 0xDEADBEEF (client write "
+          "didn't work)");
+  } else {
+    ERROR("✗ SERVER VERIFICATION FAILED! Unexpected value: 0x%x", first_word);
+  }
+}
+
 static void cleanup() {
   int ret;
 
   // Order of destruction should generally be reverse of allocation,
   // or based on dependencies (e.g., QPs before CQs/PDs they use, MRs before
   // PDs).
-
   // Client-specific resources (QP, CM ID, MRs)
   if (cm_client_id) {
     if (cm_client_id->qp) {
@@ -423,6 +441,8 @@ static int disconnect_and_cleanup() {
     return -errno;
   }
 
+  verify_swap_area_after_write();
+
   cleanup();
 
   INFO("Server shut-down is complete.");
@@ -487,7 +507,7 @@ int main(int argc, char **argv) {
     goto cleanup_error;
   }
 
-  initialize_swap_area_for_test();
+  init_swap_area_for_test();
 
   ret = disconnect_and_cleanup();
   if (ret) {

@@ -1,4 +1,3 @@
-#include <cstdint>
 #include <volimem/mapper.h>
 #include <volimem/vcpu.h>
 #include <volimem/volimem.h>
@@ -404,9 +403,57 @@ static int rdma_read_page(void *local_addr, u64 remote_offset) {
   return 0;
 }
 
+/**
+ * @brief Performs an RDMA WRITE to evict a page to the remote swap area.
+ *
+ * @param local_addr Local buffer to write from (i.e., in cache)
+ * @param remote_offset Offset in the remote swap area
+ * @return 0 on success, error code on failure
+ */
+static int rdma_write_page(void *local_addr, u64 remote_offset) {
+  struct ibv_sge sge;
+  sge.addr = (u64)local_addr;
+  sge.length = PAGE_SIZE;
+  sge.lkey = cache_area->lkey;
+
+  // Prepare the WRITE work request
+  struct ibv_send_wr wr, *bad_wr = NULL;
+  memset(&wr, 0, sizeof(wr));
+  wr.wr_id = 0;
+  wr.sg_list = &sge;
+  wr.num_sge = 1;
+  wr.opcode = IBV_WR_RDMA_WRITE;
+  wr.send_flags = IBV_SEND_SIGNALED;
+
+  // Set the remote address and key
+  wr.wr.rdma.remote_addr = swap_area_metadata.address + remote_offset;
+  wr.wr.rdma.rkey = swap_area_metadata.stag.remote_stag;
+
+  DEBUG("Posting RDMA WRITE: local=%p, remote=0x%lx, rkey=0x%x", local_addr,
+        wr.wr.rdma.remote_addr, wr.wr.rdma.rkey);
+
+  int ret;
+  // Post the WRITE operation
+  ret = ibv_post_send(client_qp, &wr, &bad_wr);
+  if (ret) {
+    ERROR("Failed to post RDMA WRITE, errno: %d", -errno);
+    return -errno;
+  }
+
+  struct ibv_wc wc;
+  // Wait for completion
+  ret = await_work_completion_events(io_completion_channel, &wc, 1);
+  if (ret != 1) {
+    ERROR("RDMA WRITE failed, ret = %d", ret);
+    return ret;
+  }
+
+  DEBUG("RDMA WRITE completed successfully");
+  return 0;
+}
+
 void swap_in(uptr target_vaddr, uptr remote_swap_offset, uptr cache_gva,
              uptr cache_gpa) {
-
   int ret = rdma_read_page((void *)cache_gva, remote_swap_offset);
   if (ret != 0) {
     ERROR("RDMA READ failed during swap-in");
@@ -417,11 +464,24 @@ void swap_in(uptr target_vaddr, uptr remote_swap_offset, uptr cache_gva,
   mapper_t::map_gpt(target_vaddr, cache_gpa, PAGE_SIZE, PTE_P | PTE_W);
 }
 
+void swap_out(uptr victim_vaddr, uptr remote_swap_offset, uptr cache_gva) {
+  int ret = rdma_write_page((void *)cache_gva, remote_swap_offset);
+  if (ret != 0) {
+    ERROR("RDMA WRITE failed during swap-out");
+    return;
+  }
+
+  // unmap the page from the guest page table
+  mapper_t::unmap(victim_vaddr, PAGE_SIZE);
+  // ensure that unmap actually invalidates the TLB entry
+  mapper_t::flush(victim_vaddr, PAGE_SIZE);
+}
+
 void swap_in_page(usize target_idx, uptr aligned_fault_vaddr) {
   auto cache_offset = target_idx * PAGE_SIZE;
   auto cache_gva = (uptr)cache_area->addr + cache_offset;
   auto cache_gpa = mapper_t::gva_to_gpa((void *)cache_gva);
-  INFO("Swapping IN: 0x%lx, Cache (GVA->GPA): 0x%lx->0x%lx",
+  INFO("Swapping IN: 0x%lx. Cache (GVA->GPA): 0x%lx->0x%lx",
        aligned_fault_vaddr, cache_gva, cache_gpa);
 
   auto target_offset = aligned_fault_vaddr - HEAP_START;
@@ -431,6 +491,34 @@ void swap_in_page(usize target_idx, uptr aligned_fault_vaddr) {
   auto &target_page = pages[target_idx];
   target_page.vaddr = aligned_fault_vaddr;
   target_page.state = PageState::Mapped;
+}
+
+void swap_out_page(usize victim_idx) {
+  // victim page is the i-th page within the heap
+  auto &victim_page = pages[victim_idx];
+
+  if (victim_page.state != PageState::Mapped) {
+    ERROR("Cannot swap out non-mapped page %zu", victim_idx);
+    return;
+  }
+
+  auto victim_vaddr = victim_page.vaddr;
+  INFO("Swapping OUT: 0x%lx. GPA = 0x%lx. State = %s", victim_vaddr,
+       mapper_t::gva_to_gpa((void *)victim_vaddr),
+       page_state_to_str(victim_page.state));
+
+  // Calculate the offset in the remote swap area
+  auto victim_offset = victim_vaddr - HEAP_START;
+
+  // Calculate the cache slot GVA
+  auto cache_offset = victim_idx * PAGE_SIZE;
+  auto cache_gva = (uptr)cache_area->addr + cache_offset;
+
+  swap_out(victim_vaddr, victim_offset, cache_gva);
+
+  victim_page.reset();
+
+  INFO("Page %zu swapped out successfully", victim_idx);
 }
 
 void handle_fault(void *fault_addr, regstate_t *regstate) {
@@ -466,14 +554,41 @@ void virtual_main(void *any) {
        (uptr)HEAP_START + HEAP_SIZE);
 
   // Trigger the first swap by reading from the start of the heap
-  volatile u32 *heap_ptr = (volatile u32 *)HEAP_START;
-
+  /*
+  volatile u32 *heap_ptr = (volatile u32 *)(HEAP_START + PAGE_SIZE);
   DEBUG("About to trigger first page fault by reading from 0x%lx", HEAP_START);
-
   u32 value = *heap_ptr; // This will cause a fault
-
   DEBUG("Read value: 0x%x", value);
   ENSURE(value == 0xDEADBEEF, "Read value must be 0xDEADBEEF");
+  */
+
+  // ===== TEST 1: SWAP IN (RDMA READ) =====
+  DEBUG("\n=== TEST 1: SWAP IN (RDMA READ) ===");
+  volatile u32 *heap_ptr = (volatile u32 *)HEAP_START;
+  DEBUG("Triggering page fault by reading from 0x%lx", HEAP_START);
+
+  u32 value = *heap_ptr; // Fault -> swap_in_page(0, HEAP_START)
+  DEBUG("Read value: 0x%x", value);
+  ENSURE(value == 0xDEADBEEF, "Read value must be 0xDEADBEEF");
+  INFO("✓ SWAP IN test passed!");
+
+  *heap_ptr = 0xCAFEBABE;
+  ENSURE(*heap_ptr == 0xCAFEBABE, "Modified value must be 0xCAFEBABE");
+  INFO("✓ Page modification successful!");
+
+  // ===== TEST 2: SWAP OUT (RDMA WRITE) =====
+  DEBUG("\n=== TEST 3: SWAP OUT (RDMA WRITE) ===");
+  swap_out_page(0); // Evict the page we just modified
+  INFO("✓ SWAP OUT test passed!");
+
+  // ===== TEST 3: VERIFY SWAP OUT =====
+  DEBUG("\n=== TEST 4: VERIFY SWAP OUT ===");
+  // Try to read again - should fault and swap back in
+  DEBUG("Triggering page fault again by reading from 0x%lx", HEAP_START);
+  value = *heap_ptr; // Fault -> swap_in_page(0, HEAP_START)
+  DEBUG("Read value after swap-in: 0x%x", value);
+  ENSURE(value == 0xCAFEBABE, "Value must be 0xCAFEBABE (our modified value)");
+  INFO("✓ SWAP OUT persistence verified!");
 
   DEBUG("--- Exiting VM ---");
 }
@@ -504,7 +619,7 @@ int main(int argc, char **argv) {
       }
       break;
     case 'p':
-      server_sockaddr.sin_port = htons((uint16_t)strtol(optarg, NULL, 0));
+      server_sockaddr.sin_port = htons((u16)strtol(optarg, NULL, 0));
       break;
     default:
       usage();

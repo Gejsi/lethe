@@ -38,6 +38,8 @@ struct Page {
 
   Page() : vaddr(0), state(PageState::Free) {}
 
+  void reset() { *this = Page{}; }
+
   void print(bool inline_output = true) const {
     auto state_str = page_state_to_str(state);
 
