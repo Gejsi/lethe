@@ -1,6 +1,5 @@
 #pragma once
 
-#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 
@@ -13,8 +12,6 @@ constexpr usize NUM_PAGES = 2;
 constexpr usize SWAP_SIZE = 1 * GB;
 constexpr usize HEAP_SIZE = SWAP_SIZE;
 constexpr uptr HEAP_START = 0xffff800000000000;
-
-constexpr auto COLD_THRESHOLD = std::chrono::milliseconds(500);
 
 enum class PageState : u8 {
   // slot is empty

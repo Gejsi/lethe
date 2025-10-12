@@ -1,6 +1,5 @@
 #pragma once
 
-#include "utils.h"
 #include <arpa/inet.h>
 #include <cstdio>
 #include <getopt.h>
@@ -12,6 +11,8 @@
 
 #include <infiniband/verbs.h>
 #include <rdma/rdma_cma.h>
+
+#include "utils.h"
 
 #ifdef ACN_RDMA_DEBUG
 /* Debug Macro */

@@ -24,13 +24,12 @@ static struct ibv_qp *client_qp; // queue pair
 // This information (often called "buffer attributes" or "metadata") is
 // typically exchanged using SEND/RECV operations after the connection is
 // established.
-static struct ibv_mr *server_metadata_mr = NULL;
-static struct rdma_buffer_attr server_metadata_attr;
-static struct ibv_recv_wr server_recv_wr, *bad_server_recv_wr = NULL;
-static struct ibv_sge server_recv_sge;
+static struct ibv_mr *swap_area = NULL;
+static struct rdma_buffer_attr swap_area_metadata;
 /* the cache where RDMA operations source and sink */
 static struct ibv_mr *cache_area = NULL;
 
+// Pages metadata
 Page *pages;
 
 /* This function prepares client side connection resources for an RDMA
@@ -166,17 +165,19 @@ static int prepare_connection(struct sockaddr_in *s_addr) {
 /* Pre-posts a receive buffer before calling rdma_connect() */
 static int pre_post_recv_buffer() {
   int ret = -1;
-  server_metadata_mr = rdma_buffer_register(pd, &server_metadata_attr,
-                                            sizeof(server_metadata_attr),
-                                            (IBV_ACCESS_LOCAL_WRITE));
-  if (!server_metadata_mr) {
+  swap_area =
+      rdma_buffer_register(pd, &swap_area_metadata, sizeof(swap_area_metadata),
+                           (IBV_ACCESS_LOCAL_WRITE));
+  if (!swap_area) {
     ERROR("Failed to setup the server metadata mr, -ENOMEM");
     return -ENOMEM;
   }
-  server_recv_sge.addr = (uint64_t)server_metadata_mr->addr;
-  server_recv_sge.length = (uint32_t)server_metadata_mr->length;
-  server_recv_sge.lkey = (uint32_t)server_metadata_mr->lkey;
+  struct ibv_sge server_recv_sge;
+  server_recv_sge.addr = (u64)swap_area->addr;
+  server_recv_sge.length = (u32)swap_area->length;
+  server_recv_sge.lkey = (u32)swap_area->lkey;
   /* now we link it to the request */
+  struct ibv_recv_wr server_recv_wr, *bad_server_recv_wr = NULL;
   memset(&server_recv_wr, 0, sizeof(server_recv_wr));
   server_recv_wr.sg_list = &server_recv_sge;
   server_recv_wr.num_sge = 1;
@@ -266,9 +267,9 @@ static int receive_server_metadata() {
   }
 
   DEBUG("Server's swap area metadata received. addr: %p, len: %u, stag: 0x%x",
-        (void *)server_metadata_attr.address,
-        (unsigned int)server_metadata_attr.length,
-        server_metadata_attr.stag.local_stag);
+        (void *)swap_area_metadata.address,
+        (unsigned int)swap_area_metadata.length,
+        swap_area_metadata.stag.local_stag);
 
   return 0;
 }
@@ -324,9 +325,9 @@ static int disconnect_and_cleanup() {
   }
 
   // Deregister the memory region we used to receive the server's metadata
-  if (server_metadata_mr) {
-    rdma_buffer_deregister(server_metadata_mr);
-    server_metadata_mr = NULL;
+  if (swap_area) {
+    rdma_buffer_deregister(swap_area);
+    swap_area = NULL;
   }
 
   // Free the page metadata array
@@ -354,13 +355,125 @@ void usage() {
   exit(1);
 }
 
+/**
+ * @brief Performs an RDMA READ to fetch a page from the remote swap area.
+ *
+ * @param local_addr Local buffer where data should be placed (i.e., in cache)
+ * @param remote_offset Offset in the remote swap area
+ * @return 0 on success, error code on failure
+ */
+static int rdma_read_page(void *local_addr, u64 remote_offset) {
+  struct ibv_sge sge;
+  sge.addr = (u64)local_addr;
+  sge.length = PAGE_SIZE;
+  sge.lkey = cache_area->lkey;
+
+  // Prepare the READ work request
+  struct ibv_send_wr wr, *bad_wr = NULL;
+  memset(&wr, 0, sizeof(wr));
+  wr.wr_id = 0;
+  wr.sg_list = &sge;
+  wr.num_sge = 1;
+  wr.opcode = IBV_WR_RDMA_READ;
+  wr.send_flags = IBV_SEND_SIGNALED;
+
+  // Set the remote address and key
+  wr.wr.rdma.remote_addr = swap_area_metadata.address + remote_offset;
+  wr.wr.rdma.rkey = swap_area_metadata.stag.remote_stag;
+
+  DEBUG("Posting RDMA READ: local=%p, remote=0x%lx, rkey=0x%x", local_addr,
+        wr.wr.rdma.remote_addr, wr.wr.rdma.rkey);
+
+  int ret;
+  // Post the READ operation
+  ret = ibv_post_send(client_qp, &wr, &bad_wr);
+  if (ret) {
+    ERROR("Failed to post RDMA READ, errno: %d", -errno);
+    return -errno;
+  }
+
+  struct ibv_wc wc;
+  // Wait for completion
+  ret = await_work_completion_events(io_completion_channel, &wc, 1);
+  if (ret != 1) {
+    ERROR("RDMA READ failed, ret = %d", ret);
+    return ret;
+  }
+
+  DEBUG("RDMA READ completed successfully");
+  return 0;
+}
+
+void swap_in(uptr target_vaddr, uptr remote_swap_offset, uptr cache_gva,
+             uptr cache_gpa) {
+
+  int ret = rdma_read_page((void *)cache_gva, remote_swap_offset);
+  if (ret != 0) {
+    ERROR("RDMA READ failed during swap-in");
+    return;
+  }
+
+  // map the PF in the guest page table (so the GVA -> GPA mapping exists)
+  mapper_t::map_gpt(target_vaddr, cache_gpa, PAGE_SIZE, PTE_P | PTE_W);
+}
+
+void swap_in_page(usize target_idx, uptr aligned_fault_vaddr) {
+  auto cache_offset = target_idx * PAGE_SIZE;
+  auto cache_gva = (uptr)cache_area->addr + cache_offset;
+  auto cache_gpa = mapper_t::gva_to_gpa((void *)cache_gva);
+  INFO("Swapping IN: 0x%lx, Cache (GVA->GPA): 0x%lx->0x%lx",
+       aligned_fault_vaddr, cache_gva, cache_gpa);
+
+  auto target_offset = aligned_fault_vaddr - HEAP_START;
+  // auto swap_src = (uptr)swap_area->addr + target_offset;
+  swap_in(aligned_fault_vaddr, target_offset, cache_gva, cache_gpa);
+
+  auto &target_page = pages[target_idx];
+  target_page.vaddr = aligned_fault_vaddr;
+  target_page.state = PageState::Mapped;
+}
+
+void handle_fault(void *fault_addr, regstate_t *regstate) {
+  DEBUG("Handling fault at %p. Error code: %lu", fault_addr,
+        regstate->error_code);
+
+  // align to page boundary
+  uptr aligned_fault_vaddr = (uptr)fault_addr & ~(PAGE_SIZE - 1);
+
+  // sanity check: should be within our heap
+  if (aligned_fault_vaddr < HEAP_START ||
+      aligned_fault_vaddr >= HEAP_START + HEAP_SIZE) {
+    ERROR("Fault address 0x%lx outside of heap range [0x%lx, 0x%lx)",
+          aligned_fault_vaddr, HEAP_START, HEAP_START + HEAP_SIZE);
+    return;
+  }
+
+  swap_in_page(0, aligned_fault_vaddr);
+
+  INFO("Page fault handled successfully");
+}
+
 void virtual_main(void *any) {
   UNUSED(any);
 
   DEBUG("--- Inside VM ---");
-
   DEBUG("Running on the vCPU apic %lu", local_vcpu->lapic_id);
   DEBUG("Root page table is at %p", (void *)mapper_t::get_root());
+
+  auto seg = new segment_t(HEAP_SIZE, HEAP_START);
+  mapper_t::assign_handler(seg, handle_fault);
+  INFO("Fault handling segment registered: [0x%lx, 0x%lx)", HEAP_START,
+       (uptr)HEAP_START + HEAP_SIZE);
+
+  // Trigger the first swap by reading from the start of the heap
+  volatile u32 *heap_ptr = (volatile u32 *)HEAP_START;
+
+  DEBUG("About to trigger first page fault by reading from 0x%lx", HEAP_START);
+
+  u32 value = *heap_ptr; // This will cause a fault
+
+  DEBUG("Read value: 0x%x", value);
+  ENSURE(value == 0xDEADBEEF, "Read value must be 0xDEADBEEF");
 
   DEBUG("--- Exiting VM ---");
 }

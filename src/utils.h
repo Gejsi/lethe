@@ -3,8 +3,6 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <thread>
-#include <volimem/x86constants.h>
 
 #define UNUSED(x) (void)(x)
 
@@ -69,13 +67,13 @@ using i16 = int16_t;
 using i32 = int32_t;
 using i64 = int64_t;
 
-using Clock = std::chrono::steady_clock;
-using TimePoint = Clock::time_point;
-using Milliseconds = std::chrono::milliseconds;
-
 constexpr usize KB = 1024;
 constexpr usize MB = KB * KB;
 constexpr usize GB = MB * KB;
+
+using Clock = std::chrono::steady_clock;
+using TimePoint = Clock::time_point;
+using Milliseconds = std::chrono::milliseconds;
 
 constexpr const char *bool_to_str(bool b) noexcept {
   return b ? "true" : "false";

@@ -299,6 +299,19 @@ static int send_server_metadata_to_client() {
   return 0;
 }
 
+/**
+ * @brief Initializes the swap area with test data.
+ */
+static void initialize_swap_area_for_test() {
+  u32 *page = (u32 *)(swap_area->addr);
+  size_t num_words = PAGE_SIZE / sizeof(u32);
+  for (size_t i = 0; i < num_words; i++) {
+    page[i] = 0xDEADBEEF;
+  }
+
+  INFO("Swap area initialized: first page filled with 0xDEADBEEF");
+}
+
 static void cleanup() {
   int ret;
 
@@ -473,6 +486,9 @@ int main(int argc, char **argv) {
     ERROR("Failed to send server metadata to the client, ret = %d", ret);
     goto cleanup_error;
   }
+
+  initialize_swap_area_for_test();
+
   ret = disconnect_and_cleanup();
   if (ret) {
     ERROR("Failed to clean up resources properly, ret = %d", ret);
