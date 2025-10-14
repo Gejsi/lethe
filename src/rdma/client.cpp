@@ -577,12 +577,12 @@ void virtual_main(void *any) {
   INFO("✓ Page modification successful!");
 
   // ===== TEST 2: SWAP OUT (RDMA WRITE) =====
-  DEBUG("\n=== TEST 3: SWAP OUT (RDMA WRITE) ===");
+  DEBUG("\n=== TEST 2: SWAP OUT (RDMA WRITE) ===");
   swap_out_page(0); // Evict the page we just modified
   INFO("✓ SWAP OUT test passed!");
 
   // ===== TEST 3: VERIFY SWAP OUT =====
-  DEBUG("\n=== TEST 4: VERIFY SWAP OUT ===");
+  DEBUG("\n=== TEST 3: VERIFY SWAP OUT ===");
   // Try to read again - should fault and swap back in
   DEBUG("Triggering page fault again by reading from 0x%lx", HEAP_START);
   value = *heap_ptr; // Fault -> swap_in_page(0, HEAP_START)

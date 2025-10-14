@@ -24,17 +24,43 @@
 #define debug(...)
 #endif /* ACN_RDMA_DEBUG */
 
-/* Capacity of the completion queue (CQ) */
-#define CQ_CAPACITY (1024)
+/*
+ * MAX work requests (WR).
+ * This defines the capacity of the Send Queue and Receive Queue within a
+ * Queue Pair (QP). It limits the number of RDMA operations you can post
+ * before you absolutely *must* poll the CQ to see if some have completed.
+ *
+ * The Send Queue (SQ) and Receive Queue (RQ) are queues on the RNIC where
+ * the "Work Requests" (WRs) are posted using ibv_post_send() and
+ * ibv_post_recv(). This number is their depth.
+ */
+constexpr usize MAX_WR = 512;
+
+/*
+ * Capacity of the completion queue (CQ).
+ *
+ * The Completion Queue (CQ) is a circular buffer in memory where
+ * the RDMA hardware (RNIC) places a "Work Completion" (WC) entry every time
+ * an operation (like a READ, WRITE, or SEND) finishes. This value defines the
+ * maximum number of completion entries the CQ can hold.
+ * A good rule of thumb is CQ_CAPACITY >= (2 * MAX_WR).
+ */
+constexpr usize CQ_CAPACITY = 1024;
+
 /*
  * An SGE (struct ibv_sge) describes a contiguous block of memory
- * with its address, length, and lkey.
+ * with its address, length, and lkey. This defines the maximum number of SGEs
+ * you can have in a single Work Request.
+ *
+ * SGE stands for Scatter/Gather Element. It describes
+ * a single RDMA operation that reads from multiple separate memory locations
+ * and writes them into a single contiguous block on the remote end (gather),
+ * or reads from a single block and writes it to multiple locations (scatter).
+ *
+ * Since the swapper operates on single, contiguous pages, each RDMA operation
+ * (READ or WRITE) only ever requires one SGE. A value of 1 is sufficient.
  */
-#define MAX_SGE (2)
-/* MAX work requests.
- * This limits the number of RDMA ops we can post before polling completions.
- */
-#define MAX_WR (512)
+constexpr usize MAX_SGE = 1;
 
 /* Default address and port where the RDMA server is listening */
 constexpr const char *DEFAULT_SERVER_ADDR = "10.0.0.1";
