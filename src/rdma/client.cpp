@@ -477,8 +477,14 @@ void swap_out(uptr victim_vaddr, uptr remote_swap_offset, uptr cache_gva) {
   mapper_t::flush(victim_vaddr, PAGE_SIZE);
 }
 
-void swap_in_page(usize target_idx, uptr aligned_fault_vaddr) {
-  auto cache_offset = target_idx * PAGE_SIZE;
+void swap_in_page(Page *page, uptr aligned_fault_vaddr) {
+  if (page == nullptr) {
+    ERROR("Failed to swap in: null page");
+    return;
+  }
+
+  usize page_idx = (usize)(page - pages);
+  auto cache_offset = page_idx * PAGE_SIZE;
   auto cache_gva = (uptr)cache_area->addr + cache_offset;
   auto cache_gpa = mapper_t::gva_to_gpa((void *)cache_gva);
   INFO("Swapping IN: 0x%lx. Cache (GVA->GPA): 0x%lx->0x%lx",
@@ -488,37 +494,40 @@ void swap_in_page(usize target_idx, uptr aligned_fault_vaddr) {
   // auto swap_src = (uptr)swap_area->addr + target_offset;
   swap_in(aligned_fault_vaddr, target_offset, cache_gva, cache_gpa);
 
-  auto &target_page = pages[target_idx];
+  auto &target_page = pages[page_idx];
   target_page.vaddr = aligned_fault_vaddr;
   target_page.state = PageState::Mapped;
 }
 
-void swap_out_page(usize victim_idx) {
-  // victim page is the i-th page within the heap
-  auto &victim_page = pages[victim_idx];
-
-  if (victim_page.state != PageState::Mapped) {
-    ERROR("Cannot swap out non-mapped page %zu", victim_idx);
+void swap_out_page(Page *page) {
+  if (page == nullptr) {
+    ERROR("Failed to swap out: null page");
     return;
   }
 
-  auto victim_vaddr = victim_page.vaddr;
+  // victim page is the n-th page within the heap
+  auto victim_vaddr = page->vaddr;
+  if (page->state != PageState::Mapped) {
+    ERROR("Failed to swap out: non-mapped page 0x%lx", victim_vaddr);
+    return;
+  }
+
   INFO("Swapping OUT: 0x%lx. GPA = 0x%lx. State = %s", victim_vaddr,
        mapper_t::gva_to_gpa((void *)victim_vaddr),
-       page_state_to_str(victim_page.state));
+       page_state_to_str(page->state));
 
   // Calculate the offset in the remote swap area
   auto victim_offset = victim_vaddr - HEAP_START;
 
-  // Calculate the cache slot GVA
-  auto cache_offset = victim_idx * PAGE_SIZE;
+  usize page_idx = (usize)(page - pages);
+  auto cache_offset = page_idx * PAGE_SIZE;
   auto cache_gva = (uptr)cache_area->addr + cache_offset;
 
   swap_out(victim_vaddr, victim_offset, cache_gva);
 
-  victim_page.reset();
+  page->reset();
 
-  INFO("Page %zu swapped out successfully", victim_idx);
+  INFO("Page %zu swapped out successfully", page_idx);
 }
 
 void handle_fault(void *fault_addr, regstate_t *regstate) {
@@ -536,7 +545,7 @@ void handle_fault(void *fault_addr, regstate_t *regstate) {
     return;
   }
 
-  swap_in_page(0, aligned_fault_vaddr);
+  swap_in_page(&pages[0], aligned_fault_vaddr);
 
   INFO("Page fault handled successfully");
 }
@@ -578,7 +587,7 @@ void virtual_main(void *any) {
 
   // ===== TEST 2: SWAP OUT (RDMA WRITE) =====
   DEBUG("\n=== TEST 2: SWAP OUT (RDMA WRITE) ===");
-  swap_out_page(0); // Evict the page we just modified
+  swap_out_page(&pages[0]); // Evict the modified page
   INFO("✓ SWAP OUT test passed!");
 
   // ===== TEST 3: VERIFY SWAP OUT =====
