@@ -30,6 +30,13 @@
     abort();                                                                   \
   } while (0)
 
+#define UNREACHABLE(fmt, ...)                                                  \
+  do {                                                                         \
+    fprintf(stderr, CLR_PANIC "[UNREACHABLE] %s:%d (%s): " fmt CLR_RESET "\n", \
+            __FILE__, __LINE__, __func__, ##__VA_ARGS__);                      \
+    abort();                                                                   \
+  } while (0)
+
 // basically `assert` but doesn't flood
 // with register errors when called within a volimem fault handler
 #define ENSURE(cond, msg)                                                      \
@@ -80,8 +87,3 @@ constexpr const char *bool_to_str(bool b) noexcept {
 }
 
 void sleep_ms(usize ms);
-
-bool pte_is_present(uptr pte);
-bool pte_is_writable(uptr pte);
-bool pte_is_accessed(uptr pte);
-bool pte_is_dirty(uptr pte);

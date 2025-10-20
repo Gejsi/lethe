@@ -72,13 +72,6 @@ void print_lists() {
   }
 }
 
-void set_permissions(uptr vaddr, uptr flags, bool flush = true) {
-  mapper_t::mprotect(vaddr, PAGE_SIZE, flags);
-  if (flush) {
-    mapper_t::flush(vaddr, PAGE_SIZE);
-  }
-}
-
 usize get_rr_page() {
   static usize next_idx = 0;
   usize idx = next_idx;
@@ -107,7 +100,7 @@ void demote() {
 
     auto pte = mapper_t::get_protect(p->vaddr);
     if (pte_is_accessed(pte)) {
-      set_permissions(p->vaddr, pte & ~(uptr)(PTE_A | PTE_D));
+      set_permissions(p->vaddr, pte & ~(u64)(PTE_A | PTE_D));
       hot_pages.push_front(p);
     } else {
       inactive_pages.push_front(p);
@@ -207,7 +200,7 @@ void handle_fault(void *fault_addr, regstate_t *regstate) {
     auto pte = mapper_t::get_protect(victim_page->vaddr);
     if (pte_is_accessed(pte)) {
       // clear the accessed and dirty bits to check future accesses
-      set_permissions(victim_page->vaddr, pte & ~(uptr)(PTE_A | PTE_D));
+      set_permissions(victim_page->vaddr, pte & ~(u64)(PTE_A | PTE_D));
       active_pages.push_front(victim_page);
     } else {
       usize victim_idx = (usize)(victim_page - pages);

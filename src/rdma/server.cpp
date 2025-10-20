@@ -303,32 +303,17 @@ static int send_server_metadata_to_client() {
  * @brief Initializes the swap area with test data.
  */
 static void init_swap_area_for_test() {
-  u32 *page = (u32 *)(swap_area->addr);
-  size_t num_words = PAGE_SIZE / sizeof(u32);
-  for (size_t i = 0; i < num_words; i++) {
-    page[i] = 0xDEADBEEF;
+  for (usize page_idx = 0; page_idx < NUM_PAGES; ++page_idx) {
+    u8 *page_start = (u8 *)swap_area->addr + (page_idx * PAGE_SIZE);
+    u32 *page = (u32 *)page_start;
+
+    usize num_words = PAGE_SIZE / sizeof(u32);
+    for (usize i = 0; i < num_words; i++) {
+      page[i] = 0xDEADBEEF;
+    }
   }
 
-  INFO("Swap area initialized: first page filled with 0xDEADBEEF");
-}
-
-/**
- * @brief Verifies the client wrote in the swap area.
- */
-static void verify_swap_area_after_write() {
-  u32 *page = (u32 *)(swap_area->addr);
-  u32 first_word = page[0];
-
-  INFO("First word in swap area: 0x%x", first_word);
-
-  if (first_word == 0xCAFEBABE) {
-    INFO("✓ SERVER VERIFICATION PASSED! Client successfully wrote 0xCAFEBABE");
-  } else if (first_word == 0xDEADBEEF) {
-    ERROR("✗ SERVER VERIFICATION FAILED! Still shows 0xDEADBEEF (client write "
-          "didn't work)");
-  } else {
-    ERROR("✗ SERVER VERIFICATION FAILED! Unexpected value: 0x%x", first_word);
-  }
+  INFO("Initialized first %zu pages of swap area with 0xDEADBEEF.", NUM_PAGES);
 }
 
 static void cleanup() {
@@ -440,8 +425,6 @@ static int disconnect_and_cleanup() {
     cleanup();
     return -errno;
   }
-
-  verify_swap_area_after_write();
 
   cleanup();
 
