@@ -21,7 +21,7 @@ set(SRC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 # Configure with:
 # cmake -DVOLIMEM_ROOT_DIR=/path/to/volimem ..
-set(VOLIMEM_ROOT_DIR "$ENV{HOME}/Desktop/voli" CACHE PATH "Root directory of the VoliMem installation")
+set(VOLIMEM_ROOT_DIR "$ENV{HOME}/desk/voli" CACHE PATH "Root directory of the VoliMem installation")
 # Find VoliMem include directory and library
 find_path(VOLIMEM_INCLUDE_DIR
           NAMES volimem/volimem.h 
@@ -67,11 +67,11 @@ set(COMMON_SOURCES
 )
 
 # Playground
-add_executable(playground
-  ${COMMON_SOURCES}
-  ${SRC}/playground.cpp
-)
-target_link_libraries(playground PRIVATE common)
+# add_executable(playground
+#   ${COMMON_SOURCES}
+#   ${SRC}/playground.cpp
+# )
+# target_link_libraries(playground PRIVATE common)
 
 # Server
 add_executable(server

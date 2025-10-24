@@ -119,7 +119,7 @@ int await_work_completion_events(struct ibv_comp_channel *comp_channel,
   struct ibv_cq *cq_ptr = NULL;
   void *context = NULL;
   int ret = -1, i, total_wc = 0;
-  /* We wait for the notification on the CQ channel */
+  /* wait for the notification on the CQ channel */
   ret = ibv_get_cq_event(
       comp_channel, /* IO channel where we are expecting the notification */
       &cq_ptr,   /* which CQ has an activity. This should be the same as CQ we
@@ -152,12 +152,11 @@ int await_work_completion_events(struct ibv_comp_channel *comp_channel,
     }
     total_wc += ret;
   } while (total_wc < max_wc);
-  /* Now we check validity and status of I/O work completions */
+  /* check validity and status of I/O work completions */
   for (i = 0; i < total_wc; i++) {
     if (wc[i].status != IBV_WC_SUCCESS) {
       ERROR("Work completion (WC) has error status: %s at index %d",
             ibv_wc_status_str(wc[i].status), i);
-      /* return negative value */
       return -(wc[i].status);
     }
   }

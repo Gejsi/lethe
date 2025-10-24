@@ -13,19 +13,16 @@ constexpr usize SWAP_SIZE = 1 * GB;
 constexpr usize HEAP_SIZE = SWAP_SIZE;
 constexpr uptr HEAP_START = 0xffff800000000000;
 
-enum class PageState : u8 {
-  // slot is empty
-  Free,
-  // slot holds a page
-  Mapped,
-};
+enum class PageState : u8 { Unmapped, Mapped, RemotelyMapped };
 
 constexpr const char *page_state_to_str(PageState state) {
   switch (state) {
-  case PageState::Free:
+  case PageState::Unmapped:
     return "Free";
   case PageState::Mapped:
     return "Mapped";
+  case PageState::RemotelyMapped:
+    return "RemotelyMapped";
   default:
     return "Unknown";
   }
@@ -34,21 +31,17 @@ constexpr const char *page_state_to_str(PageState state) {
 struct Page {
   // Maps a virtual page from the heap to a cache slot
   uptr vaddr;
-  PageState state;
 
-  Page() : vaddr(0), state(PageState::Free) {}
+  Page() : vaddr(0) {}
 
   void reset() { *this = Page{}; }
 
   void print(bool inline_output = true) const {
-    auto state_str = page_state_to_str(state);
-
     if (inline_output) {
-      printf("Page { vaddr: 0x%lx, state: %s }\n", vaddr, state_str);
+      printf("Page { vaddr: 0x%lx }\n", vaddr);
     } else {
       printf("Page {\n");
       printf("  vaddr: 0x%lx,\n", vaddr);
-      printf("  state: %s\n", state_str);
       printf("}\n");
     }
   }
@@ -70,3 +63,7 @@ bool pte_is_present(u64 pte);
 bool pte_is_writable(u64 pte);
 bool pte_is_accessed(u64 pte);
 bool pte_is_dirty(u64 pte);
+// Map a virtual page to a physical page
+void map(uptr gva, uptr gpa);
+// Unmap a page from the guest page table
+void unmap(uptr gva);

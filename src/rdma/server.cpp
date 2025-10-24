@@ -490,7 +490,7 @@ int main(int argc, char **argv) {
     goto cleanup_error;
   }
 
-  init_swap_area_for_test();
+  // init_swap_area_for_test();
 
   ret = disconnect_and_cleanup();
   if (ret) {
