@@ -60,7 +60,7 @@ void print_lists(const char *caller) {
     p->print();
   }
 
-  printf("=== Map ===\n");
+  printf("=== States ===\n");
   for (auto p : state_map) {
     printf("0x%lx -> %s\n", p.first, page_state_to_str(p.second));
   }
@@ -588,6 +588,17 @@ void swap_out_page(Page *page) {
        cache_gva, mapper_t::gva_to_gpa((void *)victim_vaddr));
 
   swap_out(victim_vaddr, victim_offset, cache_gva);
+  // auto perms = mapper_t::get_protect(victim_vaddr);
+
+  // if (pte_is_dirty(perms)) {
+  //   INFO("Page %zu (GVA 0x%lx) is DIRTY. Writing back to server.",
+  //        (usize)(page - pages), victim_vaddr);
+  //   swap_out(victim_vaddr, victim_offset, cache_gva);
+  // } else {
+  //   INFO("Page %zu (GVA 0x%lx) is CLEAN. Skipping write-back.",
+  //        (usize)(page - pages), victim_vaddr);
+  //   unmap(victim_vaddr); // just unmap it without an RDMA WRITE
+  // }
 
   page->reset();
 }
@@ -657,39 +668,7 @@ void handle_fault(void *fault_addr, regstate_t *regstate) {
 }
 
 void rebalance_lists() {
-  {
-    std::lock_guard<std::mutex> lock(pages_mutex);
-    DEBUG("----------START REBALANCING----------");
-    print_lists("rebalance_lists start");
-  }
-
-  {
-    std::lock_guard<std::mutex> lock(pages_mutex);
-    // Promotion: cold -> hot
-    for (auto it = inactive_pages.begin(); it != inactive_pages.end();) {
-      auto cold_page = *it;
-      auto perms = mapper_t::get_protect(cold_page->vaddr);
-
-      if (pte_is_accessed(perms)) {
-        // page is hot, promote to active
-        active_pages.push_front(cold_page);
-        it = inactive_pages.erase(it);
-        clear_permissions(cold_page->vaddr, PTE_A);
-        DEBUG("Promoted page %zu (gva 0x%lx) to active list",
-              (usize)(cold_page - pages), cold_page->vaddr);
-      } else {
-        // page is still cold, keep it in the inactive list
-        ++it;
-        DEBUG("Page %zu is still cold", (usize)(cold_page - pages));
-      }
-    }
-  }
-
-  {
-    std::lock_guard<std::mutex> lock(pages_mutex);
-    print_lists("rebalance_lists after promotion");
-  }
-
+  DEBUG("----------START REBALANCING----------");
   {
     std::lock_guard<std::mutex> lock(pages_mutex);
     // Demotion: hot -> cold
@@ -704,7 +683,7 @@ void rebalance_lists() {
         DEBUG("Page %zu is still hot, giving another chance",
               (usize)(hot_page - pages));
       } else {
-        // page is cold, demote it to the inactive list
+        // page has become cold, demote it to the inactive list
         inactive_pages.push_front(hot_page);
         it = active_pages.erase(it); // returns iterator to the next element
         DEBUG("Demote page %zu (gva 0x%lx) to inactive list",
@@ -715,9 +694,27 @@ void rebalance_lists() {
 
   {
     std::lock_guard<std::mutex> lock(pages_mutex);
-    print_lists("rebalance_lists end");
-    DEBUG("----------END REBALANCING----------");
+    // Promotion: cold -> hot
+    for (auto it = inactive_pages.begin(); it != inactive_pages.end();) {
+      auto cold_page = *it;
+      auto perms = mapper_t::get_protect(cold_page->vaddr);
+
+      if (pte_is_accessed(perms)) {
+        // page has become hot, promote to active
+        active_pages.push_front(cold_page);
+        it = inactive_pages.erase(it);
+        clear_permissions(cold_page->vaddr, PTE_A);
+        DEBUG("Promoted page %zu (gva 0x%lx) to active list",
+              (usize)(cold_page - pages), cold_page->vaddr);
+      } else {
+        // page is still cold, keep it in the inactive list
+        ++it;
+        DEBUG("Page %zu is still cold", (usize)(cold_page - pages));
+      }
+    }
   }
+
+  DEBUG("----------END REBALANCING----------");
 }
 
 void handle_rebalance() {
@@ -739,132 +736,70 @@ void virtual_main(void *any) {
   INFO("Fault handling segment registered: [0x%lx, 0x%lx)", HEAP_START,
        (uptr)HEAP_START + HEAP_SIZE);
 
-  // std::thread rebalance_thread(handle_rebalance);
-  // rebalance_thread.detach();
+  std::thread rebalance_thread(handle_rebalance);
+  rebalance_thread.detach();
 
-  /*
-  DEBUG("\n=== TEST 1: FILL THE CACHE (%zu pages) ===", NUM_PAGES);
-  for (size_t i = 0; i < NUM_PAGES; ++i) {
-    volatile u32 *ptr = (volatile u32 *)(HEAP_START + i * PAGE_SIZE);
-    *ptr; // fault in P0, P1, P2, P3
-  }
-  INFO("✓ Cache is now full. All pages are on the active list.");
-  {
-    std::lock_guard<std::mutex> lock(pages_mutex);
-    print_lists("vm");
+  // ============================================================
+  // MANUAL TESTING
+  // ============================================================
+
+  volatile u32 *p[NUM_PAGES + 1];
+  for (size_t i = 0; i < NUM_PAGES + 1; ++i) {
+    p[i] = (volatile u32 *)(HEAP_START + i * PAGE_SIZE);
   }
 
-  // Let pages get cold
-  DEBUG("\n=== TEST 2: WAITING FOR REBALANCE THREAD ===");
-  INFO("Sleeping for 500ms to allow rebalance thread to demote pages...");
-  // Wait enough for the rebalance thread to run a couple of times
+  // ===== 1. Fault in P0 and make it dirty =====
+  INFO("\n[1] Faulting in P0 and writing 0xCAFEBABE...");
+  *p[0] = 0xCAFEBABE;
+
+  // ===== 2. Wait for ONLY P0 to be demoted =====
+  INFO("\n[2] Waiting 500ms for P0 to be demoted to inactive...");
   sleep_ms(500);
-  // At this point, since we haven't touched the pages, the rebalance thread
-  // should have moved all pages from the active to the inactive list.
   {
     std::lock_guard<std::mutex> lock(pages_mutex);
-    print_lists("vm");
+    print_lists("After P0 demotion");
+    // EXPECT: P0 is on the inactive list.
   }
 
-  // Trigger eviction from inactive list
-  DEBUG("\n=== TEST 3: TRIGGER EVICTION FROM INACTIVE LIST ===");
-  uptr fifth_page_addr = HEAP_START + NUM_PAGES * PAGE_SIZE;
-  volatile u32 *fifth_page_ptr = (volatile u32 *)fifth_page_addr;
-  INFO("Accessing a 5th page (0x%lx) to trigger eviction...", fifth_page_addr);
-
-  *fifth_page_ptr; // This should now evict from the inactive list
-
-  INFO("✓ Successfully swapped in 5th page.");
+  // ===== 3. Fault in the rest of the cache (P1, P2, P3) =====
+  INFO("\n[3] Filling the rest of the cache to make P0 the oldest...");
+  for (u32 i = 1; i < NUM_PAGES; ++i) {
+    *p[i] = i; // Fault in and dirty the other pages
+  }
+  INFO("✓ Cache is now full.");
   {
     std::lock_guard<std::mutex> lock(pages_mutex);
-    print_lists("vm"); // Should show a page from the old inactive list is gone.
+    print_lists("After filling cache");
+    // EXPECT: P1, P2, P3 are on the active list. P0 is on the inactive list.
   }
-  */
 
-  /*
-  // Fault in a single page, Page 0.
-  volatile u32 *p0 = (volatile u32 *)HEAP_START;
-  *p0; // Faults in page 0. Its A-bit is now 1.
-  INFO("Fauled in Page 0. It should be on the active list.");
+  // ===== 4. Wait for all other pages to be demoted =====
+  INFO("\n[4] Waiting 500ms for P1, P2, P3 to be demoted...");
+  sleep_ms(500);
   {
     std::lock_guard<std::mutex> lock(pages_mutex);
-    print_lists("vm"); // Expect: Active=[0]
+    print_lists("After all pages are inactive");
+    // EXPECT: All pages are on the inactive list. P0 should be at the back.
   }
 
-  // Wait for the rebalance thread to run and clear the A-bit.
-  INFO("\nSleeping for 300ms. Rebalance thread should run and clear A-bit for "
-       "Page 0.");
-  sleep_ms(300);
-  // After this, the A-bit for Page 0 should be 0.
-
-  // Wait again. The rebalance thread should now see the A-bit is 0.
-  INFO("\nSleeping for 300ms again. Rebalance thread should now see A-bit is 0 "
-       "and demote Page 0.");
-  sleep_ms(300);
+  // ===== 5. Force eviction of the original dirty page (P0) =====
+  INFO("\n[5] Faulting on P4 to force eviction of the coldest page (P0)...");
+  *p[NUM_PAGES]; // Access p[4]
+  INFO("✓ Eviction triggered.");
   {
     std::lock_guard<std::mutex> lock(pages_mutex);
-    print_lists("vm"); // EXPECT: Active=[], Inactive=[0]
+    print_lists("After evicting P0");
+    // EXPECT: The log should show P0 was DIRTY and swapped out.
+    // The map state for P0 should be RemotelyMapped.
   }
-  */
 
-  /*
-  uptr test_addr = HEAP_START;
-  volatile u32 *ptr = (volatile u32 *)test_addr;
-
-  INFO("Faulting in page with a READ at 0x%lx...", test_addr);
-  u32 initial_value = *ptr;
-  INFO("Page faulted in. Initial value: 0x%x", initial_value);
-
-  INFO("Checking permissions after initial READ fault...");
-  print_perms(test_addr);
-
-  INFO("Performing a WRITE to 0x%lx...", test_addr);
-  *ptr = 0xCAFEBABE;
-  INFO("Checking permissions after WRITE operation...");
-  print_perms(test_addr);
-
-  clear_permissions(test_addr, PTE_A | PTE_P);
-  print_perms(test_addr);
-  */
-
-  DEBUG("\n=== TEST 1: DEMAND-ZERO ===");
-  uptr p0_addr = HEAP_START;
-  volatile u32 *p0_ptr = (volatile u32 *)p0_addr;
-
-  INFO("Accessing new page 0x%lx. Should be demand-zeroed.", p0_addr);
-  u32 initial_value = *p0_ptr; // Triggers fault
-  ENSURE(initial_value == 0, "Demand-zeroed page should contain 0.");
-  INFO("✓ Page correctly zeroed. Read value: 0x%x", initial_value);
-
-  // Write a custom value to the page.
-  *p0_ptr = 0xCAFEBABE;
-  ENSURE(*p0_ptr == 0xCAFEBABE, "Should be able to write to the page.");
-  INFO("✓ Wrote 0xCAFEBABE to page 0x%lx.", p0_addr);
-  print_lists("vm");
-
-  // ===== TEST 2: FILL CACHE TO FORCE EVICTION =====
-  DEBUG("\n=== TEST 2: FILL CACHE TO EVICT PAGE 0 ===");
-  // Access NUM_PAGES other pages to fill the cache and evict P0.
-  for (size_t i = 1; i <= NUM_PAGES; ++i) {
-    uptr fault_addr = HEAP_START + i * PAGE_SIZE;
-    volatile u32 *ptr = (volatile u32 *)fault_addr;
-    *ptr; // Fault in P1, P2, P3, P4... This will eventually evict P0.
-  }
-  INFO("✓ Cache filled, Page 0 should now be swapped out.");
-  print_lists("vm");
-
-  // ===== TEST 3: SWAP-IN VERIFICATION =====
-  DEBUG("\n=== TEST 3: SWAP-IN VERIFICATION ===");
-  INFO("Accessing page 0x%lx again. Should be swapped in from server.",
-       p0_addr);
-
-  // This fault should trigger the swap-in path.
-  u32 final_value = *p0_ptr;
-  INFO("✓ Read value after swap-in: 0x%x", final_value);
+  // ===== 6. Swap P0 back in and verify its contents =====
+  INFO("\n[6] Faulting on P0 to trigger SWAP-IN...");
+  u32 final_value = *p[0];
+  INFO("✓ Read value from swapped-in P0: 0x%x", final_value);
   ENSURE(final_value == 0xCAFEBABE,
-         "Swapped-in page must contain the value we wrote.");
-  INFO("✓ Data persistence across swap-out/swap-in is confirmed!");
-  print_lists("vm");
+         "DATA CORRUPTION! Dirty page data was lost.");
+  INFO("✓ SUCCESS: Dirty page write-back and swap-in confirmed!");
 
   DEBUG("--- Exiting VM ---");
 }
