@@ -46,17 +46,17 @@ void print_lists(const char *caller) {
          free_pages.size(), inactive_pages.size(), active_pages.size());
 
   printf("=== Free Pages ===\n");
-  for (Page *p : free_pages) {
+  for (auto p : free_pages) {
     p->print();
   }
 
   printf("=== Inactive Pages ===\n");
-  for (Page *p : inactive_pages) {
+  for (auto p : inactive_pages) {
     p->print();
   }
 
   printf("=== Active Pages ===\n");
-  for (Page *p : active_pages) {
+  for (auto p : active_pages) {
     p->print();
   }
 
@@ -638,8 +638,19 @@ void handle_fault(void *fault_addr, regstate_t *regstate) {
     }
 
     auto victim_vaddr = victim_page->vaddr;
-    swap_out_page(victim_page);
-    state_map[victim_vaddr] = PageState::RemotelyMapped;
+
+    if (auto perms = mapper_t::get_protect(victim_vaddr); pte_is_dirty(perms)) {
+      swap_out_page(victim_page);
+      state_map[victim_vaddr] = PageState::RemotelyMapped;
+    } else {
+      INFO("Page %zu (GVA 0x%lx) is CLEAN. Skipping write-back.",
+           (usize)(victim_page - pages), victim_vaddr);
+
+      unmap(victim_vaddr);
+      victim_page->reset();
+      state_map[victim_vaddr] = PageState::Unmapped;
+    }
+
     page = victim_page;
   }
 
@@ -674,9 +685,9 @@ void rebalance_lists() {
     // Demotion: hot -> cold
     for (auto it = active_pages.begin(); it != active_pages.end();) {
       auto hot_page = *it;
-      auto perms = mapper_t::get_protect(hot_page->vaddr);
 
-      if (pte_is_accessed(perms)) {
+      if (auto perms = mapper_t::get_protect(hot_page->vaddr);
+          pte_is_accessed(perms)) {
         // page is still hot, clear the A-bit and keep it in the active list
         clear_permissions(hot_page->vaddr, PTE_A);
         ++it;
@@ -697,9 +708,9 @@ void rebalance_lists() {
     // Promotion: cold -> hot
     for (auto it = inactive_pages.begin(); it != inactive_pages.end();) {
       auto cold_page = *it;
-      auto perms = mapper_t::get_protect(cold_page->vaddr);
 
-      if (pte_is_accessed(perms)) {
+      if (auto perms = mapper_t::get_protect(cold_page->vaddr);
+          pte_is_accessed(perms)) {
         // page has become hot, promote to active
         active_pages.push_front(cold_page);
         it = inactive_pages.erase(it);
@@ -743,6 +754,53 @@ void virtual_main(void *any) {
   // MANUAL TESTING
   // ============================================================
 
+  volatile u32 *p[NUM_PAGES + 2];
+  for (size_t i = 0; i < NUM_PAGES + 2; ++i) {
+    p[i] = (volatile u32 *)(HEAP_START + i * PAGE_SIZE);
+  }
+
+  // ===== 1. Setup: Create one clean (P0) and one dirty (P1) page =====
+  INFO("\n[1] Faulting in P0 (clean) and P1 (dirty)...");
+  *p[0];
+  *p[1] = 0xCAFEBABE;
+  INFO("✓ P0 and P1 are on the active list.");
+
+  // ===== 2. Setup: Fill the rest of the cache =====
+  for (size_t i = 2; i < NUM_PAGES; ++i) {
+    *p[i];
+  }
+  INFO("✓ Cache is now full.");
+  print_lists("After cache fill");
+
+  // ===== 3. Test: Wait for ALL pages to be demoted =====
+  INFO("\n[2] Waiting 1s for all pages to become inactive...");
+  sleep_ms(1000); // Long sleep to ensure all pages are demoted.
+  print_lists("After all pages inactive");
+  // EXPECT: All pages are on the inactive list. The oldest should be P0, then
+  // P1.
+
+  // ===== 4. Test: Evict the clean page =====
+  INFO("\n[3] Faulting on a new page to evict the COLDEST page...");
+  *p[NUM_PAGES]; // This should evict the page at the back of the inactive list.
+  INFO("✓ First eviction complete. Check log for victim.");
+  print_lists("After first eviction");
+
+  // ===== 5. Test: Evict the dirty page =====
+  INFO("\n[4] Faulting on another new page to evict the NEXT COLDEST page...");
+  *p[NUM_PAGES + 1];
+  INFO("✓ Second eviction complete. Check log for victim.");
+  print_lists("After second eviction");
+
+  // ===== 6. Verification =====
+  INFO("\n[5] Verifying data...");
+  u32 p0_val = *p[0]; // Should be demand-zeroed -> 0
+  u32 p1_val = *p[1]; // Should be swapped in -> 0xCAFEBABE
+  INFO("Value of P0: 0x%x. Value of P1: 0x%x", p0_val, p1_val);
+  ENSURE(p0_val == 0, "Clean-evicted page should be zero.");
+  ENSURE(p1_val == 0xCAFEBABE, "Dirty-evicted page should have its data.");
+  INFO("✓ All tests passed!");
+
+  /*
   volatile u32 *p[NUM_PAGES + 1];
   for (size_t i = 0; i < NUM_PAGES + 1; ++i) {
     p[i] = (volatile u32 *)(HEAP_START + i * PAGE_SIZE);
@@ -800,6 +858,7 @@ void virtual_main(void *any) {
   ENSURE(final_value == 0xCAFEBABE,
          "DATA CORRUPTION! Dirty page data was lost.");
   INFO("✓ SUCCESS: Dirty page write-back and swap-in confirmed!");
+  */
 
   DEBUG("--- Exiting VM ---");
 }

@@ -8,7 +8,7 @@
 constexpr usize PAGE_SIZE = 4 * KB;
 constexpr usize CACHE_SIZE = 128 * MB;
 // constexpr usize NUM_PAGES = CACHE_SIZE / PAGE_SIZE;
-constexpr usize NUM_PAGES = 4;
+constexpr usize NUM_PAGES = 3;
 constexpr usize SWAP_SIZE = 1 * GB;
 constexpr usize HEAP_SIZE = SWAP_SIZE;
 constexpr uptr HEAP_START = 0xffff800000000000;
@@ -18,7 +18,7 @@ enum class PageState : u8 { Unmapped, Mapped, RemotelyMapped };
 constexpr const char *page_state_to_str(PageState state) {
   switch (state) {
   case PageState::Unmapped:
-    return "Free";
+    return "Unmapped";
   case PageState::Mapped:
     return "Mapped";
   case PageState::RemotelyMapped:
