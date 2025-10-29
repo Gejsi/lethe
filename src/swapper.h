@@ -8,7 +8,8 @@
 constexpr usize PAGE_SIZE = 4 * KB;
 constexpr usize CACHE_SIZE = 128 * MB;
 // constexpr usize NUM_PAGES = CACHE_SIZE / PAGE_SIZE;
-constexpr usize NUM_PAGES = 3;
+constexpr usize NUM_PAGES = 4;
+constexpr usize REAP_THRESHOLD = 2;
 constexpr usize SWAP_SIZE = 1 * GB;
 constexpr usize HEAP_SIZE = SWAP_SIZE;
 constexpr uptr HEAP_START = 0xffff800000000000;
@@ -63,6 +64,7 @@ bool pte_is_present(u64 pte);
 bool pte_is_writable(u64 pte);
 bool pte_is_accessed(u64 pte);
 bool pte_is_dirty(u64 pte);
+// TODO: rename the following functions to add  `_gva` suffix
 // Map a virtual page to a physical page
 void map(uptr gva, uptr gpa);
 // Unmap a page from the guest page table

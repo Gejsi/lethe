@@ -34,10 +34,9 @@ static struct ibv_mr *cache_area = NULL;
 
 // Pages metadata
 Page *pages;
-std::list<Page *> active_pages, inactive_pages; // mapped pages
-std::list<Page *> free_pages;                   // track available cache slots
 std::mutex pages_mutex;
-
+std::list<Page *> active_pages, inactive_pages; // mapped pages
+std::list<Page *> free_pages;                   // available cache slots
 std::unordered_map<uptr, PageState> state_map;
 
 // NOTE: caller must hold the lists mutex
@@ -439,6 +438,7 @@ void usage() {
   exit(1);
 }
 
+// TODO: the read/write rdma functions are almost identical, refactor them.
 /**
  * @brief Performs an RDMA READ to fetch a page from the remote swap area.
  *
@@ -584,21 +584,19 @@ void swap_out_page(Page *page) {
   auto victim_offset = victim_vaddr - HEAP_START;
   auto cache_gva = get_cache_gva(page);
 
-  INFO("Swapping OUT: 0x%lx. Cache (gva->gpa): 0x%lx->0x%lx", victim_vaddr,
-       cache_gva, mapper_t::gva_to_gpa((void *)victim_vaddr));
+  if (auto perms = mapper_t::get_protect(victim_vaddr); pte_is_dirty(perms)) {
+    INFO("Swapping OUT: 0x%lx. Cache (gva->gpa): 0x%lx->0x%lx", victim_vaddr,
+         cache_gva, mapper_t::gva_to_gpa((void *)victim_vaddr));
 
-  swap_out(victim_vaddr, victim_offset, cache_gva);
-  // auto perms = mapper_t::get_protect(victim_vaddr);
+    swap_out(victim_vaddr, victim_offset, cache_gva);
+    state_map[victim_vaddr] = PageState::RemotelyMapped;
+  } else {
+    INFO("Unmapping clean page %zu (GVA 0x%lx). Skipping write-back.",
+         (usize)(page - pages), victim_vaddr);
 
-  // if (pte_is_dirty(perms)) {
-  //   INFO("Page %zu (GVA 0x%lx) is DIRTY. Writing back to server.",
-  //        (usize)(page - pages), victim_vaddr);
-  //   swap_out(victim_vaddr, victim_offset, cache_gva);
-  // } else {
-  //   INFO("Page %zu (GVA 0x%lx) is CLEAN. Skipping write-back.",
-  //        (usize)(page - pages), victim_vaddr);
-  //   unmap(victim_vaddr); // just unmap it without an RDMA WRITE
-  // }
+    unmap(victim_vaddr);
+    state_map[victim_vaddr] = PageState::Unmapped;
+  }
 
   page->reset();
 }
@@ -637,19 +635,20 @@ void handle_fault(void *fault_addr, regstate_t *regstate) {
       UNREACHABLE("No pages available to evict from any list");
     }
 
-    auto victim_vaddr = victim_page->vaddr;
+    // auto victim_vaddr = victim_page->vaddr;
+    swap_out_page(victim_page);
 
-    if (auto perms = mapper_t::get_protect(victim_vaddr); pte_is_dirty(perms)) {
-      swap_out_page(victim_page);
-      state_map[victim_vaddr] = PageState::RemotelyMapped;
-    } else {
-      INFO("Page %zu (GVA 0x%lx) is CLEAN. Skipping write-back.",
-           (usize)(victim_page - pages), victim_vaddr);
+    // if (auto perms = mapper_t::get_protect(victim_vaddr);
+    // pte_is_dirty(perms)) {
+    //   state_map[victim_vaddr] = PageState::RemotelyMapped;
+    // } else {
+    //   INFO("Page %zu (GVA 0x%lx) is CLEAN. Skipping write-back.",
+    //        (usize)(victim_page - pages), victim_vaddr);
 
-      unmap(victim_vaddr);
-      victim_page->reset();
-      state_map[victim_vaddr] = PageState::Unmapped;
-    }
+    //   unmap(victim_vaddr);
+    //   victim_page->reset();
+    //   state_map[victim_vaddr] = PageState::Unmapped;
+    // }
 
     page = victim_page;
   }
@@ -697,7 +696,7 @@ void rebalance_lists() {
         // page has become cold, demote it to the inactive list
         inactive_pages.push_front(hot_page);
         it = active_pages.erase(it); // returns iterator to the next element
-        DEBUG("Demote page %zu (gva 0x%lx) to inactive list",
+        DEBUG("Demoted page %zu (gva 0x%lx) to inactive list",
               (usize)(hot_page - pages), hot_page->vaddr);
       }
     }
@@ -722,6 +721,24 @@ void rebalance_lists() {
         ++it;
         DEBUG("Page %zu is still cold", (usize)(cold_page - pages));
       }
+    }
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(pages_mutex);
+    // Reap: proactively free up cold pages if we are below our reserve target
+    while (free_pages.size() < REAP_THRESHOLD && !inactive_pages.empty()) {
+      Page *victim_page = inactive_pages.back();
+      inactive_pages.pop_back();
+
+      uptr victim_gva = victim_page->vaddr;
+
+      swap_out_page(victim_page);
+
+      free_pages.push_back(victim_page);
+
+      DEBUG("Reaped page %zu (GVA 0x%lx) to maintain some amount of free pages",
+            (usize)(victim_page - pages), victim_gva);
     }
   }
 
@@ -754,111 +771,53 @@ void virtual_main(void *any) {
   // MANUAL TESTING
   // ============================================================
 
-  volatile u32 *p[NUM_PAGES + 2];
-  for (size_t i = 0; i < NUM_PAGES + 2; ++i) {
+  volatile u32 *p[NUM_PAGES];
+  for (usize i = 0; i < NUM_PAGES; ++i) {
     p[i] = (volatile u32 *)(HEAP_START + i * PAGE_SIZE);
   }
 
-  // ===== 1. Setup: Create one clean (P0) and one dirty (P1) page =====
-  INFO("\n[1] Faulting in P0 (clean) and P1 (dirty)...");
-  *p[0];
-  *p[1] = 0xCAFEBABE;
-  INFO("✓ P0 and P1 are on the active list.");
+  // ===== 1. Make P0 the oldest and DIRTY =====
+  INFO("\n[1] Making P0 dirty...");
+  *p[0] = 0xCAFEBABE;
+  sleep_ms(500); // Wait for it to be demoted. It's now the only page on the
+                 // inactive list.
 
-  // ===== 2. Setup: Fill the rest of the cache =====
-  for (size_t i = 2; i < NUM_PAGES; ++i) {
-    *p[i];
-  }
-  INFO("✓ Cache is now full.");
+  // ===== 2. Make P1 the next oldest and CLEAN =====
+  INFO("\n[2] Making P1 clean...");
+  *p[1];         // Just read from it.
+  sleep_ms(500); // Wait for it to also be demoted.
+
+  // ===== 3. Fill the rest of the cache =====
+  INFO("\n[3] Filling cache with P2, P3...");
+  *p[2];
+  *p[3];
   print_lists("After cache fill");
 
-  // ===== 3. Test: Wait for ALL pages to be demoted =====
-  INFO("\n[2] Waiting 1s for all pages to become inactive...");
-  sleep_ms(1000); // Long sleep to ensure all pages are demoted.
-  print_lists("After all pages inactive");
-  // EXPECT: All pages are on the inactive list. The oldest should be P0, then
-  // P1.
+  // ===== 4. Wait for the Reaper =====
+  INFO("\n[4] Waiting 1s for reaping...");
+  sleep_ms(1000);
+  // During this time, all pages will go inactive.
+  // The inactive list order will be [P3, P2, P1, P0].
+  // The reaper needs 2 pages. It will take P0 and P1 from the back.
 
-  // ===== 4. Test: Evict the clean page =====
-  INFO("\n[3] Faulting on a new page to evict the COLDEST page...");
-  *p[NUM_PAGES]; // This should evict the page at the back of the inactive list.
-  INFO("✓ First eviction complete. Check log for victim.");
-  print_lists("After first eviction");
+  // ===== 5. Verification =====
+  INFO("\n[5] Verifying state after reaping...");
+  print_lists("After reaping");
 
-  // ===== 5. Test: Evict the dirty page =====
-  INFO("\n[4] Faulting on another new page to evict the NEXT COLDEST page...");
-  *p[NUM_PAGES + 1];
-  INFO("✓ Second eviction complete. Check log for victim.");
-  print_lists("After second eviction");
+  std::lock_guard<std::mutex> lock(pages_mutex);
+  // P0 was dirty, its state must be RemotelyMapped
+  ENSURE(state_map.at(HEAP_START) == PageState::RemotelyMapped,
+         "Dirty page P0 was not marked RemotelyMapped");
+  INFO("✓ Dirty page P0 correctly marked.");
 
-  // ===== 6. Verification =====
-  INFO("\n[5] Verifying data...");
-  u32 p0_val = *p[0]; // Should be demand-zeroed -> 0
-  u32 p1_val = *p[1]; // Should be swapped in -> 0xCAFEBABE
-  INFO("Value of P0: 0x%x. Value of P1: 0x%x", p0_val, p1_val);
-  ENSURE(p0_val == 0, "Clean-evicted page should be zero.");
-  ENSURE(p1_val == 0xCAFEBABE, "Dirty-evicted page should have its data.");
-  INFO("✓ All tests passed!");
+  // P1 was clean, its state must be Unmapped
+  ENSURE(state_map.at(HEAP_START + PAGE_SIZE) == PageState::Unmapped,
+         "Clean page P1 was not marked Unmapped");
+  INFO("✓ Clean page P1 correctly marked.");
 
-  /*
-  volatile u32 *p[NUM_PAGES + 1];
-  for (size_t i = 0; i < NUM_PAGES + 1; ++i) {
-    p[i] = (volatile u32 *)(HEAP_START + i * PAGE_SIZE);
-  }
-
-  // ===== 1. Fault in P0 and make it dirty =====
-  INFO("\n[1] Faulting in P0 and writing 0xCAFEBABE...");
-  *p[0] = 0xCAFEBABE;
-
-  // ===== 2. Wait for ONLY P0 to be demoted =====
-  INFO("\n[2] Waiting 500ms for P0 to be demoted to inactive...");
-  sleep_ms(500);
-  {
-    std::lock_guard<std::mutex> lock(pages_mutex);
-    print_lists("After P0 demotion");
-    // EXPECT: P0 is on the inactive list.
-  }
-
-  // ===== 3. Fault in the rest of the cache (P1, P2, P3) =====
-  INFO("\n[3] Filling the rest of the cache to make P0 the oldest...");
-  for (u32 i = 1; i < NUM_PAGES; ++i) {
-    *p[i] = i; // Fault in and dirty the other pages
-  }
-  INFO("✓ Cache is now full.");
-  {
-    std::lock_guard<std::mutex> lock(pages_mutex);
-    print_lists("After filling cache");
-    // EXPECT: P1, P2, P3 are on the active list. P0 is on the inactive list.
-  }
-
-  // ===== 4. Wait for all other pages to be demoted =====
-  INFO("\n[4] Waiting 500ms for P1, P2, P3 to be demoted...");
-  sleep_ms(500);
-  {
-    std::lock_guard<std::mutex> lock(pages_mutex);
-    print_lists("After all pages are inactive");
-    // EXPECT: All pages are on the inactive list. P0 should be at the back.
-  }
-
-  // ===== 5. Force eviction of the original dirty page (P0) =====
-  INFO("\n[5] Faulting on P4 to force eviction of the coldest page (P0)...");
-  *p[NUM_PAGES]; // Access p[4]
-  INFO("✓ Eviction triggered.");
-  {
-    std::lock_guard<std::mutex> lock(pages_mutex);
-    print_lists("After evicting P0");
-    // EXPECT: The log should show P0 was DIRTY and swapped out.
-    // The map state for P0 should be RemotelyMapped.
-  }
-
-  // ===== 6. Swap P0 back in and verify its contents =====
-  INFO("\n[6] Faulting on P0 to trigger SWAP-IN...");
-  u32 final_value = *p[0];
-  INFO("✓ Read value from swapped-in P0: 0x%x", final_value);
-  ENSURE(final_value == 0xCAFEBABE,
-         "DATA CORRUPTION! Dirty page data was lost.");
-  INFO("✓ SUCCESS: Dirty page write-back and swap-in confirmed!");
-  */
+  ENSURE(free_pages.size() == REAP_THRESHOLD,
+         "Reaper did not meet reserve target.");
+  INFO("✓ Reaper test passed!");
 
   DEBUG("--- Exiting VM ---");
 }
