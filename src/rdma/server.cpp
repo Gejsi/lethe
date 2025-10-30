@@ -302,6 +302,7 @@ static int send_server_metadata_to_client() {
 /**
  * @brief Initializes the swap area with test data.
  */
+/*
 static void init_swap_area_for_test() {
   for (usize page_idx = 0; page_idx < NUM_PAGES; ++page_idx) {
     u8 *page_start = (u8 *)swap_area->addr + (page_idx * PAGE_SIZE);
@@ -315,6 +316,7 @@ static void init_swap_area_for_test() {
 
   INFO("Initialized first %zu pages of swap area with 0xDEADBEEF.", NUM_PAGES);
 }
+*/
 
 static void cleanup() {
   int ret;

@@ -86,6 +86,7 @@ add_executable(client
   ${COMMON_SOURCES}
   ${SRC}/rdma/common.cpp
   ${SRC}/rdma/client.cpp
+  ${SRC}/storage/rdma_storage.cpp
 )
 target_link_libraries(client PRIVATE common ${IBVERBS_LIBRARY} ${RDMACM_LIBRARY})
 
