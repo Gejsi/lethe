@@ -331,6 +331,12 @@ void handle_fault(void *fault_addr, regstate_t *regstate) {
   g_swapper->handle_fault(fault_addr, regstate);
 }
 
+void log_permissions(uptr vaddr, const char *context) {
+  auto perms = mapper_t::get_protect(vaddr);
+  printf("[%s] PTE: 0x%lx, Accessed: %s, Dirty: %s\n", context, perms,
+         bool_to_str(pte_is_accessed(perms)), bool_to_str(pte_is_dirty(perms)));
+}
+
 void virtual_main(void *any) {
   UNUSED(any);
 
@@ -343,39 +349,39 @@ void virtual_main(void *any) {
   INFO("Fault handling segment registered: [0x%lx, 0x%lx)", HEAP_START,
        (uptr)HEAP_START + HEAP_SIZE);
 
-  // g_swapper->start_background_rebalancing();
+  g_swapper->start_background_rebalancing();
 
   // ============================================================
   // MANUAL TESTING
   // ============================================================
 
-  volatile u32 *p0 = (volatile u32 *)(HEAP_START);
-  volatile u32 *p1 = (volatile u32 *)(HEAP_START + PAGE_SIZE);
+  volatile u32 *p[NUM_PAGES + 1];
+  for (size_t i = 0; i < NUM_PAGES + 1; ++i) {
+    p[i] = (volatile u32 *)(HEAP_START + i * PAGE_SIZE);
+  }
 
-  // ===== 1. Dirty the only cache slot =====
-  INFO("\n[1] Writing 0xCAFEBABE to Page 0...");
-  *p0 = 0xCAFEBABE;
-  INFO("✓ Physical slot 0 now contains 0xCAFEBABE.");
-  g_swapper->print_state("After dirtying P0");
+  // ===== 1. Fill the Cache (P0, P1, P2, P3) =====
+  INFO("\n[1] Filling the cache with P0, P1, P2, P3 (P0 is oldest, P3 is "
+       "newest).");
+  for (size_t i = 0; i < NUM_PAGES; ++i) {
+    *p[i] = (u32)i;
+  }
+  g_swapper->print_state("After cache fill");
+  // EXPECT: Active: [P3, P2, P1, P0] (front to back)
 
-  // ===== 2. Evict the dirty page =====
-  INFO("\n[2] Accessing Page 1 to force eviction of Page 0...");
-  // This fault will swap out P0 and use its physical slot for P1.
-  // Since P1 is a new page, it will take the demand-zero path.
-  *p1;
-  INFO("✓ P0 evicted, P1 is now in cache.");
-  g_swapper->print_state("After evicting P0");
+  // ===== 2. Demote all pages =====
+  INFO("\n[2] Demoting all pages to inactive list...");
+  g_swapper->demote_cold_pages(); // 1st pass clears A-bits
+  g_swapper->demote_cold_pages(); // 2nd pass demotes
+  g_swapper->print_state("After demotion");
+  // EXPECT: Inactive: [P3, P2, P1, P0] (front to back)
 
-  // ===== 3. Verification =====
-  INFO("\n[3] Reading from Page 1...");
-  u32 p1_val = *p1;
-  INFO("Value read from Page 1: 0x%x", p1_val);
-
-  // If memset is working, p1_val will be 0.
-  // If memset is commented out, p1_val will be the stale data: 0xCAFEBABE.
-  ENSURE(p1_val == 0,
-         "DEMAND-ZERO FAILED! Read stale data from recycled slot.");
-  INFO("✓ SUCCESS: Demand-zero correctly cleared the recycled cache slot.");
+  // ===== 3. Trigger Eviction =====
+  INFO("\n[3] Faulting on P4 to force eviction...");
+  // This fault will cause an eviction. The victim should be P0.
+  *p[NUM_PAGES] = 99; // Fault on P4
+  INFO("Eviction complete. Check log for victim.");
+  g_swapper->print_state("After eviction");
 
   DEBUG("--- Exiting VM ---");
 }
@@ -452,17 +458,12 @@ int main(int argc, char **argv) {
   }
 
   {
-    // Create the concrete storage backend
     auto rdma_storage = std::make_unique<RDMAStorage>(
         client_qp, io_completion_channel, cache_area, swap_area_metadata);
 
-    // Create the Swapper, injecting the storage backend
     auto swapper = std::make_unique<Swapper>(std::move(rdma_storage));
-
-    // Set the global pointer for the callback and start the thread
     g_swapper = swapper.get();
 
-    // Configure and run VoliMem with our test case.
     constexpr s_volimem_config_t voli_config{
         .log_level = INFO,
         .host_page_type = VOLIMEM_NORMAL_PAGES,

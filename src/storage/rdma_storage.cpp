@@ -7,12 +7,7 @@ RDMAStorage::RDMAStorage(struct ibv_qp *qp,
                          struct ibv_mr *local_cache_mr,
                          const rdma_buffer_attr &remote_swap_metadata)
     : qp_(qp), comp_channel_(comp_channel), local_cache_mr_(local_cache_mr),
-      remote_swap_metadata_(remote_swap_metadata) {
-  // Ensure all required resources are provided.
-  if (!qp_ || !comp_channel_ || !local_cache_mr_) {
-    PANIC("RDMAStorage created with null resources.");
-  }
-}
+      remote_swap_metadata_(remote_swap_metadata) {}
 
 int RDMAStorage::read_page(void *local_dest, u64 remote_offset) {
   return perform_rdma_op(local_dest, remote_offset, IBV_WR_RDMA_READ);
@@ -31,7 +26,7 @@ int RDMAStorage::perform_rdma_op(void *local_addr, u64 remote_offset,
 
   struct ibv_send_wr wr, *bad_wr = nullptr;
   memset(&wr, 0, sizeof(wr));
-  wr.wr_id = 0; // We use synchronous ops, so no ID is needed.
+  wr.wr_id = 0; // using synchronous ops, so no ID is needed
   wr.sg_list = &sge;
   wr.num_sge = 1;
   wr.opcode = opcode;
