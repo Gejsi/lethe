@@ -355,33 +355,37 @@ void virtual_main(void *any) {
   // MANUAL TESTING
   // ============================================================
 
-  volatile u32 *p[NUM_PAGES + 1];
-  for (size_t i = 0; i < NUM_PAGES + 1; ++i) {
+  volatile u32 *p[NUM_PAGES * 2];
+  for (size_t i = 0; i < NUM_PAGES * 2; ++i) {
     p[i] = (volatile u32 *)(HEAP_START + i * PAGE_SIZE);
   }
 
-  // ===== 1. Fill the Cache (P0, P1, P2, P3) =====
-  INFO("\n[1] Filling the cache with P0, P1, P2, P3 (P0 is oldest, P3 is "
-       "newest).");
-  for (size_t i = 0; i < NUM_PAGES; ++i) {
+  // ===== 1. Stable State =====
+  INFO("\n[1] Letting system stabilize for 2 seconds...");
+  sleep_ms(2000);
+  // EXPECT in logs: The rebalance interval should slowly increase.
+
+  // ===== 2. Apply High Pressure =====
+  INFO("\n[2] Applying high memory pressure...");
+  // Rapidly access more pages than are in the cache.
+  // This will cause many synchronous evictions.
+  for (size_t i = 0; i < NUM_PAGES + 4; ++i) {
     *p[i] = (u32)i;
   }
-  g_swapper->print_state("After cache fill");
-  // EXPECT: Active: [P3, P2, P1, P0] (front to back)
+  INFO("✓ Pressure phase complete.");
+  // EXPECT in logs: "[ADAPT] High pressure! ... Reducing sleep..."
 
-  // ===== 2. Demote all pages =====
-  INFO("\n[2] Demoting all pages to inactive list...");
-  g_swapper->demote_cold_pages(); // 1st pass clears A-bits
-  g_swapper->demote_cold_pages(); // 2nd pass demotes
-  g_swapper->print_state("After demotion");
-  // EXPECT: Inactive: [P3, P2, P1, P0] (front to back)
-
-  // ===== 3. Trigger Eviction =====
-  INFO("\n[3] Faulting on P4 to force eviction...");
-  // This fault will cause an eviction. The victim should be P0.
-  *p[NUM_PAGES] = 99; // Fault on P4
-  INFO("Eviction complete. Check log for victim.");
-  g_swapper->print_state("After eviction");
+  // ===== 3. Release Pressure & Observe Relaxation =====
+  INFO("\n[3] Releasing pressure. Waiting for system to relax...");
+  // Now, just access a small working set of pages.
+  // No more synchronous evictions should occur.
+  for (int cycle = 0; cycle < 30; ++cycle) {
+    *p[0]; // Just touch the first page
+    sleep_ms(100);
+  }
+  INFO("✓ Cooldown phase complete.");
+  // EXPECT in logs: After a while, you should start seeing
+  // "[ADAPT] System stable. Increasing sleep..."
 
   DEBUG("--- Exiting VM ---");
 }

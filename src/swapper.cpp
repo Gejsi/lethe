@@ -52,10 +52,15 @@ Swapper::~Swapper() { DEBUG("Destructing Swapper"); }
 void Swapper::start_background_rebalancing() {
   rebalance_thread_ = std::thread([this]() {
     while (true) {
-      sleep_ms(200);
+      sleep_ms(rebalance_interval_ms_);
+
+      // Rebalance lists
       demote_cold_pages();
       promote_hot_pages();
       reap_cold_pages();
+
+      // Adapt the interval at which this thread runs
+      adapt_rebalance_interval();
     }
   });
 
@@ -118,6 +123,10 @@ Page *Swapper::acquire_page() {
 
   // evict chosen page
   swap_out_page(victim_page);
+
+  // increase count of evictions to possibly
+  // adapt the frequency of the rebalancing
+  synchronous_evictions_in_cycle_++;
 
   return victim_page;
 }
@@ -210,9 +219,10 @@ void Swapper::handle_fault(void *fault_addr, regstate_t *regstate) {
 
 void Swapper::demote_cold_pages() {
   std::lock_guard<std::mutex> lock(pages_mutex_);
-  DEBUG("----------START DEMOTE----------");
+  // DEBUG("----------START DEMOTE----------");
 
-  for (auto it = active_pages_.begin(); it != active_pages_.end();) {
+  // iterate from the back (oldest hot page) to the front (newest hot page)
+  for (auto it = active_pages_.rbegin(); it != active_pages_.rend();) {
     auto hot_page = *it;
 
     if (auto perms = mapper_t::get_protect(hot_page->vaddr);
@@ -220,23 +230,28 @@ void Swapper::demote_cold_pages() {
       // page is still hot, clear the A-bit and keep it in the active list
       clear_permissions(hot_page->vaddr, PTE_A);
       ++it;
-      DEBUG("Page %zu is still hot, giving another chance",
-            get_page_idx(hot_page));
+
+      // DEBUG("Page %zu is still hot, giving another chance",
+      // get_page_idx(hot_page));
     } else {
       // page has become cold, demote it to the inactive list
-      inactive_pages_.push_back(hot_page);
-      it = active_pages_.erase(it); // returns iterator to the next element
-      DEBUG("Demoted page %zu (gva 0x%lx) to inactive list",
-            get_page_idx(hot_page), hot_page->vaddr);
+      inactive_pages_.push_front(hot_page);
+
+      // basically like calling `erase` but in reverse
+      it = std::list<Page *>::reverse_iterator(
+          active_pages_.erase(std::next(it).base()));
+
+      // DEBUG("Demoted page %zu (gva 0x%lx) to inactive list",
+      //       get_page_idx(hot_page), hot_page->vaddr);
     }
   }
 
-  DEBUG("----------END DEMOTE----------");
+  // DEBUG("----------END DEMOTE----------");
 }
 
 void Swapper::promote_hot_pages() {
   std::lock_guard<std::mutex> lock(pages_mutex_);
-  DEBUG("----------START PROMOTE----------");
+  // DEBUG("----------START PROMOTE----------");
 
   for (auto it = inactive_pages_.begin(); it != inactive_pages_.end();) {
     auto cold_page = *it;
@@ -247,34 +262,72 @@ void Swapper::promote_hot_pages() {
       active_pages_.push_front(cold_page);
       it = inactive_pages_.erase(it);
       clear_permissions(cold_page->vaddr, PTE_A);
-      DEBUG("Promoted page %zu (gva 0x%lx) to active list",
-            get_page_idx(cold_page), cold_page->vaddr);
+      // DEBUG("Promoted page %zu (gva 0x%lx) to active list",
+      //       get_page_idx(cold_page), cold_page->vaddr);
     } else {
       // page is still cold, keep it in the inactive list
       ++it;
-      DEBUG("Page %zu is still cold", get_page_idx(cold_page));
+      // DEBUG("Page %zu is still cold", get_page_idx(cold_page));
     }
   }
 
-  DEBUG("----------END PROMOTE----------");
+  // DEBUG("----------END PROMOTE----------");
 }
 
 void Swapper::reap_cold_pages() {
   std::lock_guard<std::mutex> lock(pages_mutex_);
-  DEBUG("----------START REAP----------");
+  // DEBUG("----------START REAP----------");
 
   while (free_pages_.size() < REAP_THRESHOLD && !inactive_pages_.empty()) {
     Page *victim_page = inactive_pages_.back();
     inactive_pages_.pop_back();
 
-    uptr victim_gva = victim_page->vaddr;
+    // uptr victim_gva = victim_page->vaddr;
 
     swap_out_page(victim_page);
 
     free_pages_.push_back(victim_page);
 
-    DEBUG("Reaped page %zu (GVA 0x%lx) to maintain some amount of free pages",
-          get_page_idx(victim_page), victim_gva);
+    // DEBUG("Reaped page %zu (GVA 0x%lx) to maintain some amount of free
+    // pages",
+    //       get_page_idx(victim_page), victim_gva);
   }
-  DEBUG("----------END REAP----------");
+  // DEBUG("----------END REAP----------");
+}
+
+void Swapper::adapt_rebalance_interval() {
+  // atomically get and reset the counter
+  if (usize evictions = synchronous_evictions_in_cycle_.exchange(0);
+      evictions > PRESSURE_THRESHOLD) {
+    // sustained pressure: multiplicative decrease
+    u32 new_interval =
+        (u32)((float)rebalance_interval_ms_ * MULTIPLICATIVE_DECREASE_FACTOR);
+    rebalance_interval_ms_ = std::max(MIN_INTERVAL_MS, new_interval);
+
+    INFO("[ADAPT] High pressure due to %zu evictions: decreased rebalancing "
+         "frequency to %u ms",
+         evictions, rebalance_interval_ms_);
+
+    // reset the cooldown counter
+    cycles_since_bad_event_ = 0;
+  } else {
+    cycles_since_bad_event_++;
+
+    // stable system: additive increase
+    if (cycles_since_bad_event_ >= COOLDOWN_CYCLES) {
+      auto cur = rebalance_interval_ms_;
+      u32 new_interval = cur + ADDITIVE_INCREASE_MS;
+      rebalance_interval_ms_ = std::min(MAX_INTERVAL_MS, new_interval);
+
+      INFO("[ADAPT] Stable system: increased rebalancing frequency to %u ms",
+           rebalance_interval_ms_);
+
+      // reset the counter to require another
+      // full cooldown period before the next increase
+      cycles_since_bad_event_ = 0;
+    }
+
+    // if the cooldown threshold wasn't reached,
+    // maintain the current interval
+  }
 }

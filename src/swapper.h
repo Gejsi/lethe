@@ -14,8 +14,8 @@
 constexpr usize PAGE_SIZE = 4 * KB;
 constexpr usize CACHE_SIZE = 128 * MB;
 // constexpr usize NUM_PAGES = CACHE_SIZE / PAGE_SIZE;
-constexpr usize NUM_PAGES = 4;
-constexpr usize REAP_THRESHOLD = 2;
+constexpr usize NUM_PAGES = 16;
+constexpr usize REAP_THRESHOLD = 4;
 constexpr usize SWAP_SIZE = 1 * GB;
 constexpr usize HEAP_SIZE = SWAP_SIZE;
 constexpr uptr HEAP_START = 0xffff800000000000;
@@ -85,8 +85,6 @@ public:
   void reap_cold_pages();
 
 private:
-  std::thread rebalance_thread_;
-
   void swap_in_page(Page *page, uptr aligned_fault_vaddr);
   void swap_out_page(Page *page);
 
@@ -126,8 +124,8 @@ private:
    *          |       ^                           |         ^
    *          |       |                           |         |
    *          +-------+                           +---------+
-   *        Promoted if                         Evicted if no
-   *        Accessed Again                      free pages exist
+   *        Stay if                              Evicted if no
+   *        accessed again                      free pages exist
    *
    * @note This function assumes the caller holds the pages_mutex_.
    */
@@ -149,4 +147,22 @@ private:
 
   // Guards access to all cache metadata
   std::mutex pages_mutex_;
+
+  std::thread rebalance_thread_;
+  // how often the rebalance thread runs, recomputed at runtime
+  u32 rebalance_interval_ms_ = 200;
+  // shared between fault handler and the rebalance thread
+  std::atomic<u32> synchronous_evictions_in_cycle_ = 0;
+  // how many cycles passed without the pressure of too many evictions
+  u32 cycles_since_bad_event_ = 0;
+  void adapt_rebalance_interval();
+  // AIMD constants
+  const u32 MIN_INTERVAL_MS = 20;   // most aggressive
+  const u32 MAX_INTERVAL_MS = 1000; // most relaxed
+  const u32 ADDITIVE_INCREASE_MS = 10;
+  const float MULTIPLICATIVE_DECREASE_FACTOR = 0.5;
+  // react if >n sync evictions happen in one cycle
+  const u8 PRESSURE_THRESHOLD = 3;
+  // relax only after n good cycles in a row
+  const u8 COOLDOWN_CYCLES = 10;
 };
