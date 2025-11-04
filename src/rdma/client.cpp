@@ -387,6 +387,8 @@ void virtual_main(void *any) {
   // EXPECT in logs: After a while, you should start seeing
   // "[ADAPT] System stable. Increasing sleep..."
 
+  g_swapper->print_stats();
+
   DEBUG("--- Exiting VM ---");
 }
 

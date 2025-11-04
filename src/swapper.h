@@ -65,6 +65,23 @@ void map_gva(uptr gva, uptr gpa);
 // Unmap a page from the guest page table
 void unmap_gva(uptr gva);
 
+struct SwapperStats {
+  std::atomic<usize> total_faults = 0;
+  std::atomic<usize> demand_zeros = 0;
+  std::atomic<usize> swap_ins = 0;
+  std::atomic<usize> swap_outs = 0;
+  // evictions that skip write-back
+  std::atomic<usize> clean_evictions = 0;
+  // evictions that happened because
+  // no free slot was find in the cache
+  std::atomic<usize> reactive_evictions = 0;
+  // evictions that happened because
+  // of the background reaper
+  std::atomic<usize> proactive_evictions = 0;
+  std::atomic<usize> promotions = 0;
+  std::atomic<usize> demotions = 0;
+};
+
 class Swapper {
 public:
   Swapper(std::unique_ptr<Storage> storage);
@@ -76,13 +93,16 @@ public:
   // Starts the background thread for LRU rebalancing
   void start_background_rebalancing();
 
-  void print_state(const char *caller_name);
   // Demotion: hot -> cold
   void demote_cold_pages();
   // Promotion: cold -> hot
   void promote_hot_pages();
   // Reap: proactively free up cold pages if below a reserve target
   void reap_cold_pages();
+
+  void print_state();
+
+  void print_stats();
 
 private:
   void swap_in_page(Page *page, uptr aligned_fault_vaddr);
@@ -142,8 +162,8 @@ private:
   std::list<Page *> inactive_pages_;
   std::list<Page *> free_pages_;
 
-  // Map tracking the state of every virtual page
-  std::unordered_map<uptr, PageState> state_map_;
+  // Map tracking the state of every faulted virtual address
+  std::unordered_map<uptr, PageState> vaddr_state_map_;
 
   // Guards access to all cache metadata
   std::mutex pages_mutex_;
@@ -152,17 +172,19 @@ private:
   // how often the rebalance thread runs, recomputed at runtime
   u32 rebalance_interval_ms_ = 200;
   // shared between fault handler and the rebalance thread
-  std::atomic<u32> synchronous_evictions_in_cycle_ = 0;
+  std::atomic<u32> evictions_in_cycle_ = 0;
   // how many cycles passed without the pressure of too many evictions
   u32 cycles_since_bad_event_ = 0;
   void adapt_rebalance_interval();
   // AIMD constants
-  const u32 MIN_INTERVAL_MS = 20;   // most aggressive
-  const u32 MAX_INTERVAL_MS = 1000; // most relaxed
-  const u32 ADDITIVE_INCREASE_MS = 10;
-  const float MULTIPLICATIVE_DECREASE_FACTOR = 0.5;
+  static constexpr u32 MIN_INTERVAL_MS = 20;  // most aggressive
+  static constexpr u32 MAX_INTERVAL_MS = 500; // most relaxed
+  static constexpr u32 ADDITIVE_INCREASE_MS = 10;
+  static constexpr float MULTIPLICATIVE_DECREASE_FACTOR = 0.5;
   // react if >n sync evictions happen in one cycle
-  const u8 PRESSURE_THRESHOLD = 3;
+  static constexpr u8 PRESSURE_THRESHOLD = 3;
   // relax only after n good cycles in a row
-  const u8 COOLDOWN_CYCLES = 10;
+  static constexpr u8 COOLDOWN_CYCLES = 6;
+
+  SwapperStats stats_;
 };
