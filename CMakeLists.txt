@@ -9,7 +9,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Place executables in '/build/bin'
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion -fsanitize=undefined -fno-omit-frame-pointer")
+set(CMAKE_CXX_FLAGS_DEBUG "-ggdb3 -O0 -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion -fsanitize=undefined -fno-omit-frame-pointer")
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -funroll-loops -flto")
 
 set(SRC ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -89,6 +89,22 @@ add_executable(client
   ${SRC}/storage/rdma_storage.cpp
 )
 target_link_libraries(client PRIVATE common ${IBVERBS_LIBRARY} ${RDMACM_LIBRARY})
+
+# Shared library to inject the swapper into applications via LD_PRELOAD
+add_library(lethe SHARED
+  ${COMMON_SOURCES}
+  ${SRC}/rdma/common.cpp
+  ${SRC}/storage/rdma_storage.cpp
+  ${SRC}/rdma/hook.cpp
+)
+# Link liblethe.so against all necessary libraries
+target_link_libraries(lethe PRIVATE
+  common
+  ${IBVERBS_LIBRARY}
+  ${RDMACM_LIBRARY}
+)
+# Place the shared library under '/build/lib'
+set_target_properties(lethe PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
 # If no build type is specified (-DCMAKE_BUILD_TYPE=Release) default to Debug
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)

@@ -161,7 +161,7 @@ void Swapper::print_stats() {
          "stalled the app)\n",
          stall_rate * 100.0, static_cast<double>(reactive_evictions),
          static_cast<double>(total_evictions_by_trigger));
-  printf("    - Churn Rate:           %.2f (Swap-Ins per Eviction)\n",
+  printf("    - Churn Rate:           %.2f (swap-ins per Eviction)\n",
          churn_rate);
   printf("    - Promotion Ratio:      %.2f%% (%.0f / %.0f inactive pages were "
          "promoted)\n",
@@ -384,7 +384,8 @@ void Swapper::reap_cold_pages() {
   std::lock_guard<std::mutex> lock(pages_mutex_);
   // DEBUG("----------START REAP----------");
 
-  while (free_pages_.size() < REAP_THRESHOLD && !inactive_pages_.empty()) {
+  // try to keep some amount of free space in the cache
+  while (free_pages_.size() < REAP_RESERVE && !inactive_pages_.empty()) {
     Page *victim_page = inactive_pages_.back();
     inactive_pages_.pop_back();
 
