@@ -85,6 +85,7 @@ target_link_libraries(server PRIVATE common ${IBVERBS_LIBRARY} ${RDMACM_LIBRARY}
 add_executable(client
   ${COMMON_SOURCES}
   ${SRC}/rdma/common.cpp
+  ${SRC}/rdma/common_client.cpp
   ${SRC}/rdma/client.cpp
   ${SRC}/storage/rdma_storage.cpp
 )
@@ -94,6 +95,7 @@ target_link_libraries(client PRIVATE common ${IBVERBS_LIBRARY} ${RDMACM_LIBRARY}
 add_library(lethe SHARED
   ${COMMON_SOURCES}
   ${SRC}/rdma/common.cpp
+  ${SRC}/rdma/common_client.cpp
   ${SRC}/storage/rdma_storage.cpp
   ${SRC}/rdma/hook.cpp
 )
