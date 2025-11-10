@@ -11,8 +11,6 @@ struct rdma_buffer_attr swap_area_metadata;
 struct ibv_mr *cache_area = NULL;
 Swapper *g_swapper = nullptr;
 
-/* This function prepares client side connection resources for an RDMA
- * connection */
 int prepare_connection(struct sockaddr_in *s_addr) {
   struct rdma_cm_event *cm_event = NULL;
   int ret = -1;
@@ -142,7 +140,6 @@ int prepare_connection(struct sockaddr_in *s_addr) {
   return 0;
 }
 
-/* Pre-posts a receive buffer before calling rdma_connect() */
 int pre_post_recv_buffer() {
   int ret = -1;
   swap_area =
@@ -203,13 +200,6 @@ int connect_to_server() {
   return 0;
 }
 
-/**
- * @brief Waits to receive the server's swap area metadata.
- *
- * This function assumes that a receive buffer has already been pre-posted.
- * It blocks until the server's metadata arrives.
- * @return 0 on success, error code on failure.
- */
 int receive_server_metadata() {
   struct ibv_wc wc;
   int ret = -1;
@@ -229,9 +219,6 @@ int receive_server_metadata() {
   return 0;
 }
 
-/* This function disconnects the RDMA connection from the server and cleans up
- * all the resources.
- */
 int disconnect_and_cleanup() {
   struct rdma_cm_event *cm_event = NULL;
   int ret = -1;

@@ -67,28 +67,31 @@ void Swapper::start_background_rebalancing() {
   rebalance_thread_.detach();
 }
 
-void Swapper::print_state() {
-  std::lock_guard<std::mutex> lock(pages_mutex_);
+void Swapper::print_state(bool use_lock) {
+  std::unique_ptr<std::lock_guard<std::mutex>> lock;
+  if (use_lock) {
+    lock = std::make_unique<std::lock_guard<std::mutex>>(pages_mutex_);
+  }
 
-  printf("Free: %zu, Inactive: %zu, Active: %zu\n", free_pages_.size(),
-         inactive_pages_.size(), active_pages_.size());
+  printf("Num pages: %zu -> Free: %zu, Inactive: %zu, Active: %zu\n", NUM_PAGES,
+         free_pages_.size(), inactive_pages_.size(), active_pages_.size());
 
-  printf("=== Free Pages ===\n");
+  printf("=== Free Pages (%zu) ===\n", free_pages_.size());
   for (auto p : free_pages_) {
     p->print();
   }
 
-  printf("=== Inactive Pages ===\n");
+  printf("=== Inactive Pages (%zu) ===\n", inactive_pages_.size());
   for (auto p : inactive_pages_) {
     p->print();
   }
 
-  printf("=== Active Pages ===\n");
+  printf("=== Active Pages (%zu) ===\n", active_pages_.size());
   for (auto p : active_pages_) {
     p->print();
   }
 
-  printf("=== Mappings ===\n");
+  printf("=== Mappings (%zu) ===\n", vaddr_state_map_.size());
   for (auto p : vaddr_state_map_) {
     printf("0x%lx -> %s\n", p.first, page_state_to_str(p.second));
   }
@@ -125,12 +128,11 @@ void Swapper::print_stats() {
                                  static_cast<double>(total_evictions_by_content)
                            : 0.0;
 
-  // If no evictions happened, efficiency is 100%
   double proactive_efficiency =
       (total_evictions_by_trigger > 0)
           ? static_cast<double>(proactive_evictions) /
                 static_cast<double>(total_evictions_by_trigger)
-          : 1.0;
+          : 0.0;
 
   double stall_rate = (total_evictions_by_trigger > 0)
                           ? static_cast<double>(reactive_evictions) /
@@ -144,43 +146,43 @@ void Swapper::print_stats() {
           : 0.0;
 
   printf("=================================================================\n");
-  printf("  PERFORMANCE METRICS:\n");
-  printf("    - Swap-In Ratio:        %.2f%% (%.0f / %.0f faults were for "
+  printf("PERFORMANCE METRICS:\n");
+  printf("  - Swap-In Ratio:        %.2f%% (%.0f / %.0f faults were for "
          "remote pages)\n",
          swap_in_ratio * 100.0, static_cast<double>(swap_ins),
          static_cast<double>(total_faults));
-  printf("    - Swap-Out Ratio:       %.2f%% (%.0f / %.0f evictions required a "
+  printf("  - Swap-Out Ratio:       %.2f%% (%.0f / %.0f evictions required a "
          "write-back)\n",
          dirty_ratio * 100.0, static_cast<double>(swap_outs),
          static_cast<double>(total_evictions_by_content));
-  printf("    - Proactive Efficiency: %.2f%% (%.0f / %.0f total evictions were "
+  printf("  - Proactive Efficiency: %.2f%% (%.0f / %.0f total evictions were "
          "proactive)\n",
          proactive_efficiency * 100.0, static_cast<double>(proactive_evictions),
          static_cast<double>(total_evictions_by_trigger));
-  printf("    - Stall Rate:           %.2f%% (%.0f / %.0f total evictions "
+  printf("  - Stall Rate:           %.2f%% (%.0f / %.0f total evictions "
          "stalled the app)\n",
          stall_rate * 100.0, static_cast<double>(reactive_evictions),
          static_cast<double>(total_evictions_by_trigger));
-  printf("    - Churn Rate:           %.2f (swap-ins per Eviction)\n",
-         churn_rate);
-  printf("    - Promotion Ratio:      %.2f%% (%.0f / %.0f inactive pages were "
+  printf("  - Churn Rate:           %.2f%% (swap-ins per eviction)\n",
+         churn_rate * 100.0);
+  printf("  - Promotion Ratio:      %.2f%% (%.0f / %.0f inactive pages were "
          "promoted)\n",
          promotion_ratio * 100.0, static_cast<double>(promotions),
          static_cast<double>(promotions + total_evictions_by_content));
 
-  printf("\n  COUNTERS:\n");
-  printf("    - Total Page Faults:   %zu\n", total_faults);
-  printf("      - Demand Zeros:    %zu\n", stats_.demand_zeros.load());
-  printf("      - Swap-Ins:        %zu\n", swap_ins);
-  printf("    - Total Evictions:     %zu\n", total_evictions_by_content);
-  printf("      - Swap-Outs (Dirty): %zu\n", swap_outs);
-  printf("      - Discards (Clean):  %zu\n", clean_evictions);
-  printf("    - Eviction Triggers:\n");
-  printf("      - Proactive (Reaper): %zu\n", proactive_evictions);
-  printf("      - Reactive (Stall):   %zu\n", reactive_evictions);
-  printf("    - LRU List Activity:\n");
-  printf("      - Promotions:      %zu\n", promotions);
-  printf("      - Demotions:       %zu\n", stats_.demotions.load());
+  printf("\nCOUNTERS:\n");
+  printf("  - Total Page Faults:   %zu\n", total_faults);
+  printf("    - Demand Zeros:    %zu\n", stats_.demand_zeros.load());
+  printf("    - Swap-Ins:        %zu\n", swap_ins);
+  printf("  - Total Evictions:     %zu\n", total_evictions_by_content);
+  printf("    - Swap-Outs (Dirty): %zu\n", swap_outs);
+  printf("    - Discards (Clean):  %zu\n", clean_evictions);
+  printf("  - Eviction Triggers:\n");
+  printf("    - Proactive (Reaper): %zu\n", proactive_evictions);
+  printf("    - Reactive (Stall):   %zu\n", reactive_evictions);
+  printf("  - LRU List Activity:\n");
+  printf("    - Promotions:      %zu\n", promotions);
+  printf("    - Demotions:       %zu\n", stats_.demotions.load());
   printf("=================================================================\n");
 }
 
@@ -204,9 +206,15 @@ Page *Swapper::acquire_page() {
   if (!inactive_pages_.empty()) {
     victim_page = inactive_pages_.back();
     inactive_pages_.pop_back();
+    DEBUG("ACQUIRE_PAGE: Free list empty. Chose victim GVA 0x%lx from inactive "
+          "list.",
+          victim_page->vaddr);
   } else if (!active_pages_.empty()) {
     victim_page = active_pages_.back();
     active_pages_.pop_back();
+    DEBUG("ACQUIRE_PAGE: Free list empty. Chose victim GVA 0x%lx from active "
+          "list.",
+          victim_page->vaddr);
   } else {
     UNREACHABLE("No pages available to evict from any list");
   }
@@ -247,16 +255,19 @@ void Swapper::swap_out_page(Page *page) {
   // victim page is the n-th page within the heap
   uptr victim_vaddr = page->vaddr;
 
-  if (auto perms = mapper_t::get_protect(victim_vaddr); pte_is_dirty(perms)) {
-    auto victim_offset = victim_vaddr - HEAP_START;
-    auto cache_gva = get_cache_gva(page);
-    INFO("Swapping OUT: 0x%lx. Cache (gva->gpa): 0x%lx->0x%lx", victim_vaddr,
-         cache_gva, mapper_t::gva_to_gpa((void *)cache_gva));
+  // FIX: the dirty-bit check needs to be implemented appropriately
+  // if (auto perms = mapper_t::get_protect(victim_vaddr); pte_is_dirty(perms))
+  // {
+  auto victim_offset = victim_vaddr - HEAP_START;
+  auto cache_gva = get_cache_gva(page);
+  INFO("Swapping OUT: 0x%lx. Cache (gva->gpa): 0x%lx->0x%lx", victim_vaddr,
+       cache_gva, mapper_t::gva_to_gpa((void *)cache_gva));
 
-    storage_->write_page((void *)cache_gva, victim_offset);
-    vaddr_state_map_[victim_vaddr] = PageState::RemotelyMapped;
+  storage_->write_page((void *)cache_gva, victim_offset);
+  vaddr_state_map_[victim_vaddr] = PageState::RemotelyMapped;
 
-    stats_.swap_outs++;
+  stats_.swap_outs++;
+  /*
   } else {
     INFO("Page %zu (GVA 0x%lx) is CLEAN. Skipping write-back.",
          (size_t)(page - pages_.get()), victim_vaddr);
@@ -265,9 +276,12 @@ void Swapper::swap_out_page(Page *page) {
     // vaddr_state_map_.erase(victim_vaddr);
     stats_.clean_evictions++;
   }
+  */
 
   unmap_gva(victim_vaddr);
   page->reset();
+
+  // print_state(false);
 }
 
 void Swapper::handle_fault(void *fault_addr, regstate_t *regstate) {
@@ -304,11 +318,9 @@ void Swapper::handle_fault(void *fault_addr, regstate_t *regstate) {
     auto cache_gpa = mapper_t::gva_to_gpa((void *)cache_gva);
     map_gva(aligned_fault_vaddr, cache_gpa);
     page->vaddr = aligned_fault_vaddr;
-
     stats_.demand_zeros++;
   } else if (page_state == PageState::RemotelyMapped) {
     swap_in_page(page, aligned_fault_vaddr);
-
     stats_.swap_ins++;
   } else {
     UNREACHABLE("A %s page (0x%lx) shouldn't cause a fault.",
@@ -317,6 +329,8 @@ void Swapper::handle_fault(void *fault_addr, regstate_t *regstate) {
 
   vaddr_state_map_[aligned_fault_vaddr] = PageState::Mapped;
   active_pages_.push_front(page);
+
+  // print_state(false);
 }
 
 void Swapper::demote_cold_pages() {

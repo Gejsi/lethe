@@ -7,6 +7,7 @@
 
 #include "common_client.h"
 #include "storage/rdma_storage.h"
+#include "utils.h"
 
 typedef int (*__libc_start_main_t)(int (*main)(int, char **, char **), int argc,
                                    char **argv,
@@ -42,8 +43,10 @@ struct libc_start_params {
 };
 
 void handle_fault(void *fault_addr, regstate_t *regstate) {
-  ENSURE(g_swapper != nullptr, "Swapper not setup");
-  ERROR("FAULT AT %p", fault_addr);
+  if (!g_swapper) {
+    PANIC("Swapper not setup");
+  }
+
   g_swapper->handle_fault(fault_addr, regstate);
 }
 
@@ -58,6 +61,8 @@ static void virtual_main(void *any) {
   mapper_t::assign_handler(seg, handle_fault);
   INFO("Fault handling segment registered: [0x%lx, 0x%lx)", HEAP_START,
        (uptr)HEAP_START + HEAP_SIZE);
+
+  // g_swapper->start_background_rebalancing();
 
   params->__libc_start_main(params->main, params->argc, params->argv,
                             params->init, params->fini, params->rtld_fini,
@@ -130,12 +135,6 @@ extern "C" int __libc_start_main(int (*main)(int, char **, char **), int argc,
   param.fini = fini;
   param.rtld_fini = rtld_fini;
   param.stack_end = stack_end;
-
-  // atexit([]() {
-  //   INFO("PID %d: Target application exited", getpid());
-  //   g_swapper->print_stats();
-  //   disconnect_and_cleanup();
-  // });
 
   constexpr s_volimem_config_t voli_config = {
       .log_level = INFO,

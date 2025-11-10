@@ -13,11 +13,11 @@
 
 constexpr usize PAGE_SIZE = 4 * KB;
 constexpr usize CACHE_SIZE = 128 * MB;
-// constexpr usize NUM_PAGES = CACHE_SIZE / PAGE_SIZE;
-constexpr usize NUM_PAGES = 16;
+constexpr usize NUM_PAGES = CACHE_SIZE / PAGE_SIZE;
+// constexpr usize NUM_PAGES = 16;
 constexpr usize REAP_RESERVE = (usize)(NUM_PAGES * 0.2);
 // constexpr usize REAP_THRESHOLD = 4;
-constexpr usize SWAP_SIZE = 1 * GB;
+constexpr usize SWAP_SIZE = 2 * GB;
 constexpr usize HEAP_SIZE = SWAP_SIZE;
 constexpr uptr HEAP_START = 0xffff800000000000;
 
@@ -101,7 +101,7 @@ public:
   // Reap: proactively free up cold pages if below a reserve target
   void reap_cold_pages();
 
-  void print_state();
+  void print_state(bool use_lock = true);
 
   void print_stats();
 

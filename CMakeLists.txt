@@ -108,6 +108,36 @@ target_link_libraries(lethe PRIVATE
 # Place the shared library under '/build/lib'
 set_target_properties(lethe PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
+# Find the pre-built YCSB-like benchmark library
+find_library(KV_BENCHMARK_LIBRARY NAMES benchmark # The library name (libbenchmark.so)
+             HINTS "$ENV{HOME}/desk/benchmark/build/lib"
+             REQUIRED)
+if(KV_BENCHMARK_LIBRARY)
+  message(STATUS "Found KV Benchmark library: ${KV_BENCHMARK_LIBRARY}")
+else()
+  message(FATAL_ERROR "KV Benchmark library not found.")
+endif()
+# Also find its include directory
+find_path(KV_BENCHMARK_INCLUDE_DIR NAMES benchmark/benchmark.h
+          HINTS "$ENV{HOME}/desk/benchmark/include"
+          REQUIRED)
+if(KV_BENCHMARK_INCLUDE_DIR)
+  message(STATUS "Found KV Benchmark include directory: ${KV_BENCHMARK_INCLUDE_DIR}")
+else()
+  message(FATAL_ERROR "KV Benchmark include directory not found.")
+endif()
+
+# Executable for running the benchmark
+add_executable(run_benchmark
+  # Main entry point for the benchmark runner
+  ${SRC}/benchmark/run_benchmark.cpp
+  ${SRC}/benchmark/heap_allocator.cpp
+)
+# Link the benchmark runner against the pre-built benchmark library
+target_link_libraries(run_benchmark PRIVATE ${KV_BENCHMARK_LIBRARY})
+# Add the necessary include directory so it can find "benchmark/benchmark.h"
+target_include_directories(run_benchmark SYSTEM PRIVATE ${KV_BENCHMARK_INCLUDE_DIR})
+
 # If no build type is specified (-DCMAKE_BUILD_TYPE=Release) default to Debug
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Debug CACHE STRING "Choose build type: Debug, Release, RelWithDebInfo, MinSizeRel" FORCE)

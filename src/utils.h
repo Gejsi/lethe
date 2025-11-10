@@ -14,6 +14,7 @@
 #define CLR_ERROR "\033[31m"
 #define CLR_PANIC "\033[1;31m" // bright red
 
+/*
 #define DEBUG(fmt, ...)                                                        \
   printf(CLR_DEBUG "[DEBUG] " fmt CLR_RESET "\n", ##__VA_ARGS__)
 #define INFO(fmt, ...)                                                         \
@@ -22,6 +23,12 @@
   printf(CLR_WARN "[WARN] " fmt CLR_RESET "\n", ##__VA_ARGS__)
 #define ERROR(fmt, ...)                                                        \
   printf(CLR_ERROR "[ERROR] " fmt CLR_RESET "\n", ##__VA_ARGS__)
+*/
+
+#define DEBUG(fmt, ...) ((void)0)
+#define INFO(fmt, ...) ((void)0)
+#define WARN(fmt, ...) ((void)0)
+#define ERROR(fmt, ...) ((void)0)
 
 #define PANIC(fmt, ...)                                                        \
   do {                                                                         \
