@@ -11,36 +11,36 @@
 // n is supposed to be a power of 2
 static size_t round_n(size_t size, size_t n) { return ((size - 1) & -n) + n; }
 
-heap_content_t *heap_content_t::init_heap_content(void *m) {
-  return (heap_content_t *)m;
+BuddyAllocator *BuddyAllocator::init_heap_content(void *m) {
+  return (BuddyAllocator *)m;
 }
 
-int heap_content_t::format_heap_content(size_t nbb) {
+int BuddyAllocator::format_heap_content(size_t nbb) {
   size_t static_offset = round_n(sizeof(*this), 1 << 12);
   size_t first_node_offset = static_offset + round_n(STATIC_SIZE, CHSIZE);
 
-  this->free_list = (struct free_chunk_t *)((char *)this + first_node_offset);
+  this->free_list = (struct FreeChunk *)((char *)this + first_node_offset);
   this->free_list->nbb = nbb - first_node_offset;
   this->free_list->next = NULL;
-  this->static_chunk = (struct free_chunk_t *)((char *)this + static_offset);
-  memset(this->arenas, 0, sizeof(struct free_chunk_t *) * MAX_SMALL_LOG);
+  this->static_chunk = (struct FreeChunk *)((char *)this + static_offset);
+  memset(this->arenas, 0, sizeof(struct FreeChunk *) * MAX_SMALL_LOG);
   // printf("static chunk %p\n", this->static_chunk);
   return 0;
 }
 
-void heap_content_t::list() {
+void BuddyAllocator::list() {
   printf(".................... %p\n", (void *)free_list);
-  for (struct free_chunk_t **cur = &free_list; *cur; cur = &(*cur)->next)
+  for (struct FreeChunk **cur = &free_list; *cur; cur = &(*cur)->next)
     printf("free chunk %ld\n", (*cur)->nbb);
 }
 
 // checks if chosen address range belongs to static region
-bool heap_content_t::hstatic(void *addr, size_t n) {
+bool BuddyAllocator::hstatic(void *addr, size_t n) {
   return addr >= this->static_chunk &&
          ((char *)addr + n) <= ((char *)this->static_chunk + STATIC_SIZE);
 }
 
-void *heap_content_t::halloc(size_t n) { // buddy allocator
+void *BuddyAllocator::halloc(size_t n) { // buddy allocator
 
   void *object = NULL;
   n = round_n(n + 2 * sizeof(size_t), CHSIZE);
@@ -58,8 +58,8 @@ void *heap_content_t::halloc(size_t n) { // buddy allocator
     return object;
   }
 
-  for (struct free_chunk_t **cur = &free_list; *cur; cur = &(*cur)->next) {
-    struct free_chunk_t *res = *cur;
+  for (struct FreeChunk **cur = &free_list; *cur; cur = &(*cur)->next) {
+    struct FreeChunk *res = *cur;
     if (res->nbb == n) {
       // consumes the whole chunk
       *cur = res->next;
@@ -68,7 +68,7 @@ void *heap_content_t::halloc(size_t n) { // buddy allocator
       break;
     } else if (n < res->nbb) {
       // splits the chunk
-      struct free_chunk_t *new_node = (struct free_chunk_t *)((char *)res + n);
+      struct FreeChunk *new_node = (struct FreeChunk *)((char *)res + n);
       new_node->nbb = res->nbb - n;
       new_node->next = res->next;
       res->nbb = n;
@@ -81,9 +81,9 @@ void *heap_content_t::halloc(size_t n) { // buddy allocator
   return object;
 }
 
-void heap_content_t::hfree(void *ptr) {
-  struct free_chunk_t *node =
-      (struct free_chunk_t *)((char *)ptr - 2 * sizeof(size_t));
+void BuddyAllocator::hfree(void *ptr) {
+  struct FreeChunk *node =
+      (struct FreeChunk *)((char *)ptr - 2 * sizeof(size_t));
   int idx = 64 - __builtin_clzll(node->nbb - 1);
   if (idx < MAX_SMALL_LOG) {
     node->next = arenas[idx];
@@ -95,8 +95,8 @@ void heap_content_t::hfree(void *ptr) {
   // printf("Pfree %ld %p\n", node->nbb, ptr);
 }
 
-size_t heap_content_t::hsize(void *ptr) {
-  struct free_chunk_t *node =
-      (struct free_chunk_t *)((char *)ptr - 2 * sizeof(size_t));
+size_t BuddyAllocator::hsize(void *ptr) {
+  struct FreeChunk *node =
+      (struct FreeChunk *)((char *)ptr - 2 * sizeof(size_t));
   return node->nbb - sizeof(size_t);
 }

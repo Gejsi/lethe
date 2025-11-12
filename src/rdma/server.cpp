@@ -1,3 +1,4 @@
+#include <cerrno>
 #include <cstdint>
 #include <cstring>
 
@@ -46,7 +47,7 @@ static int setup_client_resources() {
    * client connection came */
   pd = ibv_alloc_pd(cm_client_id->verbs);
   if (!pd) {
-    ERROR("Failed to allocate a protection domain errno: %d", -errno);
+    ERROR("Failed to allocate a protection domain: %s", strerror(errno));
     return -errno;
   }
   /* Now we need a completion channel, where the I/O completion
@@ -57,7 +58,8 @@ static int setup_client_resources() {
    */
   io_completion_channel = ibv_create_comp_channel(cm_client_id->verbs);
   if (!io_completion_channel) {
-    ERROR("Failed to create an I/O completion event channel, %d", -errno);
+    ERROR("Failed to create an I/O completion event channel: %s",
+          strerror(errno));
     return -errno;
   }
   /* Now we create a completion queue (CQ) where actual I/O
@@ -72,7 +74,7 @@ static int setup_client_resources() {
                      io_completion_channel /* which IO completion channel */,
                      0 /* signaling vector, not used here*/);
   if (!cq) {
-    ERROR("Failed to create a completion queue (cq), errno: %d", -errno);
+    ERROR("Failed to create a completion queue (cq): %s", strerror(errno));
     return -errno;
   }
   DEBUG("Completion queue (CQ) is created at %p with %d elements", (void *)cq,
@@ -81,7 +83,7 @@ static int setup_client_resources() {
   ret = ibv_req_notify_cq(cq /* on which CQ */,
                           0 /* 0 = all event type, no filter*/);
   if (ret) {
-    ERROR("Failed to request notifications on CQ errno: %d", -errno);
+    ERROR("Failed to request notifications on CQ: %s", strerror(errno));
     return -errno;
   }
   /* Now the last step, set up the queue pair (send, recv) queues and their
@@ -104,7 +106,7 @@ static int setup_client_resources() {
                        pd /* which protection domain*/,
                        &qp_init_attr /* Initial attributes */);
   if (ret) {
-    ERROR("Failed to create QP due to errno: %d", -errno);
+    ERROR("Failed to create QP: %s", strerror(errno));
     return -errno;
   }
   client_qp = cm_client_id->qp;
@@ -118,7 +120,7 @@ static int start_rdma_server(struct sockaddr_in *server_addr) {
   /*  Open a channel used to report asynchronous communication event */
   cm_event_channel = rdma_create_event_channel();
   if (!cm_event_channel) {
-    ERROR("Creating cm event channel failed with errno: %d", -errno);
+    ERROR("Creating cm event channel failed: %s", strerror(errno));
     return -errno;
   }
   /* rdma_cm_id is the connection identifier (like socket) which is used
@@ -126,13 +128,13 @@ static int start_rdma_server(struct sockaddr_in *server_addr) {
    */
   ret = rdma_create_id(cm_event_channel, &cm_server_id, NULL, RDMA_PS_TCP);
   if (ret) {
-    ERROR("Creating server cm id failed with errno: %d", -errno);
+    ERROR("Creating server cm id failed: %s", strerror(errno));
     return -errno;
   }
   /* Explicit binding of rdma cm id to the socket credentials */
   ret = rdma_bind_addr(cm_server_id, (struct sockaddr *)server_addr);
   if (ret) {
-    ERROR("Failed to bind server address, errno: %d", -errno);
+    ERROR("Failed to bind server address: %s", strerror(errno));
     return -errno;
   }
   /* Now we start to listen on the passed IP and port. However unlike
@@ -143,7 +145,8 @@ static int start_rdma_server(struct sockaddr_in *server_addr) {
   ret = rdma_listen(cm_server_id,
                     8); /* backlog = 8 clients, same as TCP, see man listen*/
   if (ret) {
-    ERROR("rdma_listen failed to listen on server address, errno: %d", -errno);
+    ERROR("rdma_listen failed to listen on server address: %s",
+          strerror(errno));
     return -errno;
   }
   INFO("Server is listening successfully at: %s, port: %d",
@@ -170,7 +173,7 @@ static int start_rdma_server(struct sockaddr_in *server_addr) {
    */
   ret = rdma_ack_cm_event(cm_event);
   if (ret) {
-    ERROR("Failed to acknowledge the cm event errno: %d", -errno);
+    ERROR("Failed to acknowledge the cm event: %s", strerror(errno));
     return -errno;
   }
   DEBUG("A new RDMA client connection id is stored at %p",
@@ -195,7 +198,7 @@ static int accept_client_connection() {
   }
   ret = rdma_accept(cm_client_id, &conn_param);
   if (ret) {
-    ERROR("Failed to accept the connection, errno: %d", -errno);
+    ERROR("Failed to accept the connection: %s", strerror(errno));
     return -errno;
   }
   /* We expect an RDMA_CM_EVNET_ESTABLISHED to indicate that the RDMA
@@ -205,13 +208,13 @@ static int accept_client_connection() {
   ret = process_rdma_cm_event(cm_event_channel, RDMA_CM_EVENT_ESTABLISHED,
                               &cm_event);
   if (ret) {
-    ERROR("Failed to get the cm event, errnp: %d", -errno);
+    ERROR("Failed to get the cm event: %s", strerror(errno));
     return -errno;
   }
   /* We acknowledge the event */
   ret = rdma_ack_cm_event(cm_event);
   if (ret) {
-    ERROR("Failed to acknowledge the cm event %d", -errno);
+    ERROR("Failed to acknowledge the cm event: %s", strerror(errno));
     return -errno;
   }
   /* extract connection information for logs */
@@ -285,8 +288,7 @@ static int send_server_metadata_to_client() {
   /* This is a fast data path operation. Posting an I/O request */
   ret = ibv_post_send(client_qp, &server_send_wr, &bad_server_send_wr);
   if (ret) {
-    ERROR("Failed to send server metadata, errno: %d (%s)", -errno,
-          strerror(errno));
+    ERROR("Failed to send server metadata: %s", strerror(errno));
     return -errno;
   }
   /* We check for completion notification */
@@ -333,8 +335,8 @@ static void cleanup() {
 
     ret = rdma_destroy_id(cm_client_id);
     if (ret) {
-      ERROR("Failed to destroy client CM ID cleanly, errno: %d. Continuing.",
-            -errno);
+      ERROR("Failed to destroy client CM ID cleanly: %s. Continuing.",
+            strerror(errno));
     }
     cm_client_id = NULL;
   }
@@ -354,16 +356,16 @@ static void cleanup() {
   if (cq) {
     ret = ibv_destroy_cq(cq);
     if (ret) {
-      ERROR("Failed to destroy CQ cleanly, errno: %d. Continuing.", -errno);
+      ERROR("Failed to destroy CQ cleanly: %s. Continuing.", strerror(errno));
     }
     cq = NULL;
   }
   if (io_completion_channel) {
     ret = ibv_destroy_comp_channel(io_completion_channel);
     if (ret) {
-      ERROR("Failed to destroy IO completion channel cleanly, errno: %d. "
+      ERROR("Failed to destroy IO completion channel cleanly: %s. "
             "Continuing.",
-            -errno);
+            strerror(errno));
     }
     io_completion_channel = NULL;
   }
@@ -372,7 +374,8 @@ static void cleanup() {
   if (pd) {
     ret = ibv_dealloc_pd(pd);
     if (ret) {
-      ERROR("Failed to deallocate PD cleanly, errno: %d. Continuing.", -errno);
+      ERROR("Failed to deallocate PD cleanly: %s. Continuing.",
+            strerror(errno));
     }
     pd = NULL;
   }
@@ -381,8 +384,8 @@ static void cleanup() {
   if (cm_server_id) {
     ret = rdma_destroy_id(cm_server_id);
     if (ret) {
-      ERROR("Failed to destroy server CM ID cleanly, errno: %d. Continuing.",
-            -errno);
+      ERROR("Failed to destroy server CM ID cleanly: %s. Continuing.",
+            strerror(errno));
     }
     cm_server_id = NULL;
   }
@@ -421,9 +424,9 @@ static int disconnect_and_cleanup() {
   /* We acknowledge the event */
   ret = rdma_ack_cm_event(cm_event);
   if (ret) {
-    ERROR("Failed to acknowledge the cm event errno: %d. Proceeding to force "
+    ERROR("Failed to acknowledge the cm event: %s. Proceeding to force "
           "cleanup.",
-          -errno);
+          strerror(errno));
     cleanup();
     return -errno;
   }

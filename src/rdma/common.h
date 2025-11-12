@@ -64,7 +64,7 @@ constexpr usize MAX_SGE = 1;
 
 /* Default address and port where the RDMA server is listening */
 constexpr const char *DEFAULT_SERVER_ADDR = "10.0.0.1";
-constexpr u16 DEFAULT_RDMA_PORT = 20886;
+constexpr u16 DEFAULT_RDMA_PORT = 8080; // 20886
 
 /*
  * Use this structure to exchange information between the server

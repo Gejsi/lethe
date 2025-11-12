@@ -12,13 +12,13 @@
 #include "utils.h"
 
 constexpr usize PAGE_SIZE = 4 * KB;
-constexpr usize CACHE_SIZE = 128 * MB;
+constexpr usize CACHE_SIZE = 64 * MB;
 constexpr usize NUM_PAGES = CACHE_SIZE / PAGE_SIZE;
-// constexpr usize NUM_PAGES = 16;
+// constexpr usize NUM_PAGES = 10;
 constexpr usize REAP_RESERVE = (usize)(NUM_PAGES * 0.2);
 // constexpr usize REAP_THRESHOLD = 4;
-constexpr usize SWAP_SIZE = 2 * GB;
-constexpr usize HEAP_SIZE = SWAP_SIZE;
+constexpr usize SWAP_SIZE = 256 * MB;
+constexpr usize HEAP_SIZE = CACHE_SIZE + SWAP_SIZE;
 constexpr uptr HEAP_START = 0xffff800000000000;
 
 enum class PageState : u8 { Unmapped, Mapped, RemotelyMapped };

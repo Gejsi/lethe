@@ -6,7 +6,7 @@
 // #include "lethe_map.h"
 #include "std_map.h"
 
-// bin/run_benchmark 1 10000 100000 uniform 0
+// LD_PRELOAD=lib/liblethe.so bin/run_benchmark 1 10000 100000 zipfian 0
 int main(int argc, char **argv) {
   if (argc < 6) {
     printf("Usage: main <NUM_THREADS> <LOAD_NUM_KEYS> <NUM_OPS> <DISTRIBUTION> "
@@ -36,7 +36,7 @@ int main(int argc, char **argv) {
                                     .hook = NULL,
                                     .args = NULL};
 
-  StdMap data_layer;
+  BumpHeapMapDataLayer data_layer;
   run_benchmark(&bench_config, &data_layer);
   // data_layer.insert(69, 420);
   // printf("Hello! %lu\n", data_layer.get(69));

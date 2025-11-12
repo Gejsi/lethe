@@ -7,20 +7,20 @@
 
 #define MAX_SMALL_LOG 25
 
-struct free_chunk_t {
+struct FreeChunk {
   size_t nbb;
   size_t padding;
-  struct free_chunk_t *next;
+  struct FreeChunk *next;
 };
 
-class heap_content_t {
+class BuddyAllocator {
 private:
   void *static_chunk;
-  struct free_chunk_t *free_list;
-  struct free_chunk_t *arenas[MAX_SMALL_LOG];
+  struct FreeChunk *free_list;
+  struct FreeChunk *arenas[MAX_SMALL_LOG];
 
 public:
-  static heap_content_t *init_heap_content(void *m);
+  static BuddyAllocator *init_heap_content(void *m);
   int format_heap_content(size_t nbb);
   void *halloc(size_t n);
   bool hstatic(void *addr, size_t n);

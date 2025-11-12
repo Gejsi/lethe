@@ -4,25 +4,24 @@
 #include <stdexcept>
 #include <unordered_map>
 
+#include "../utils.h"
 #include "heap_allocator.h"
 
-inline heap_content_t *g_lethe_heap_ctx = nullptr;
-
-inline void initialize_lethe_allocator() {
-  constexpr uintptr_t HEAP_START = 0xffff800000000000;
-  constexpr size_t HEAP_SIZE = 2ULL * 1024 * 1024 * 1024;
-
-  if (!g_lethe_heap_ctx) {
-    printf("Initializing LetheAllocator on hardcoded HEAP_START...\n");
-    g_lethe_heap_ctx = heap_content_t::init_heap_content((void *)HEAP_START);
-    g_lethe_heap_ctx->format_heap_content(HEAP_SIZE);
-  }
-}
+inline BuddyAllocator *g_lethe_heap_ctx = nullptr;
 
 template <typename T> struct LetheAllocator {
   using value_type = T;
 
-  LetheAllocator() { initialize_lethe_allocator(); }
+  LetheAllocator() {
+    constexpr uintptr_t HEAP_START = 0xffff800000000000;
+    constexpr usize HEAP_SIZE = 2 * GB;
+
+    if (!g_lethe_heap_ctx) {
+      printf("Initializing LetheAllocator on hardcoded HEAP_START...\n");
+      g_lethe_heap_ctx = BuddyAllocator::init_heap_content((void *)HEAP_START);
+      g_lethe_heap_ctx->format_heap_content(HEAP_SIZE);
+    }
+  }
 
   template <typename U>
   constexpr LetheAllocator(const LetheAllocator<U> &) noexcept {}

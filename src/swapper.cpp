@@ -1,3 +1,4 @@
+#include <cstdio>
 #include <volimem/mapper.h>
 
 #include "swapper.h"
@@ -336,6 +337,7 @@ void Swapper::handle_fault(void *fault_addr, regstate_t *regstate) {
 void Swapper::demote_cold_pages() {
   std::lock_guard<std::mutex> lock(pages_mutex_);
   // DEBUG("----------START DEMOTE----------");
+  // printf("DEMOTION\n");
 
   // iterate from the back (oldest hot page) to the front (newest hot page)
   for (auto it = active_pages_.rbegin(); it != active_pages_.rend();) {
@@ -370,6 +372,7 @@ void Swapper::demote_cold_pages() {
 void Swapper::promote_hot_pages() {
   std::lock_guard<std::mutex> lock(pages_mutex_);
   // DEBUG("----------START PROMOTE----------");
+  // printf("PROMOTION\n");
 
   for (auto it = inactive_pages_.begin(); it != inactive_pages_.end();) {
     auto cold_page = *it;

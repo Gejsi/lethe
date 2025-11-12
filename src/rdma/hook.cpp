@@ -68,8 +68,7 @@ static void virtual_main(void *any) {
                             params->init, params->fini, params->rtld_fini,
                             params->stack_end);
 
-  // never logged
-  DEBUG("--- Exiting VM ---");
+  UNREACHABLE("--- Exiting VM ---");
 }
 
 // hook to hijack the real application main
