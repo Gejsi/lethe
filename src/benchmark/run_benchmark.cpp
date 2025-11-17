@@ -1,9 +1,9 @@
 #include <benchmark/benchmark.h>
 #include <cstdio>
 
+#include "bump_map.h"
 #include "dummy_interface.h"
-#include "heap_map.h"
-// #include "lethe_map.h"
+// #include "linked_bump_map.h"
 #include "std_map.h"
 
 // LD_PRELOAD=lib/liblethe.so bin/run_benchmark 1 10000 100000 zipfian 0
@@ -36,7 +36,7 @@ int main(int argc, char **argv) {
                                     .hook = NULL,
                                     .args = NULL};
 
-  BumpHeapMapDataLayer data_layer;
+  BumpMapDataLayer data_layer;
   run_benchmark(&bench_config, &data_layer);
   // data_layer.insert(69, 420);
   // printf("Hello! %lu\n", data_layer.get(69));

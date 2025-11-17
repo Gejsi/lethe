@@ -14,9 +14,9 @@
 constexpr usize PAGE_SIZE = 4 * KB;
 constexpr usize CACHE_SIZE = 64 * MB;
 constexpr usize NUM_PAGES = CACHE_SIZE / PAGE_SIZE;
-// constexpr usize NUM_PAGES = 10;
+// constexpr usize NUM_PAGES = 4;
 constexpr usize REAP_RESERVE = (usize)(NUM_PAGES * 0.2);
-// constexpr usize REAP_THRESHOLD = 4;
+// constexpr usize REAP_RESERVE = 1;
 constexpr usize SWAP_SIZE = 256 * MB;
 constexpr usize HEAP_SIZE = CACHE_SIZE + SWAP_SIZE;
 constexpr uptr HEAP_START = 0xffff800000000000;
@@ -81,6 +81,7 @@ struct SwapperStats {
   std::atomic<usize> proactive_evictions = 0;
   std::atomic<usize> promotions = 0;
   std::atomic<usize> demotions = 0;
+  std::atomic<usize> rebalancer_skips = 0;
 };
 
 class Swapper {
@@ -164,7 +165,7 @@ private:
   std::list<Page *> free_pages_;
 
   // Map tracking the state of every faulted virtual address
-  std::unordered_map<uptr, PageState> vaddr_state_map_;
+  std::unordered_map<uptr, PageState> heap_state_map_;
 
   // Guards access to all cache metadata
   std::mutex pages_mutex_;

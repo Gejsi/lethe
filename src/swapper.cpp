@@ -1,4 +1,5 @@
 #include <cstdio>
+#include <mutex>
 #include <volimem/mapper.h>
 
 #include "swapper.h"
@@ -55,10 +56,17 @@ void Swapper::start_background_rebalancing() {
     while (true) {
       sleep_ms(rebalance_interval_ms_);
 
-      // Rebalance lists
-      demote_cold_pages();
-      promote_hot_pages();
-      reap_cold_pages();
+      {
+        std::unique_lock lock(pages_mutex_);
+        if (lock.owns_lock()) {
+          // Rebalance lists
+          demote_cold_pages();
+          promote_hot_pages();
+          reap_cold_pages();
+        } else {
+          stats_.rebalancer_skips++;
+        }
+      }
 
       // Adapt the interval at which this thread runs
       adapt_rebalance_interval();
@@ -92,8 +100,8 @@ void Swapper::print_state(bool use_lock) {
     p->print();
   }
 
-  printf("=== Mappings (%zu) ===\n", vaddr_state_map_.size());
-  for (auto p : vaddr_state_map_) {
+  printf("=== Mappings (%zu) ===\n", heap_state_map_.size());
+  for (auto p : heap_state_map_) {
     printf("0x%lx -> %s\n", p.first, page_state_to_str(p.second));
   }
 }
@@ -182,8 +190,9 @@ void Swapper::print_stats() {
   printf("    - Proactive (Reaper): %zu\n", proactive_evictions);
   printf("    - Reactive (Stall):   %zu\n", reactive_evictions);
   printf("  - LRU List Activity:\n");
-  printf("    - Promotions:      %zu\n", promotions);
-  printf("    - Demotions:       %zu\n", stats_.demotions.load());
+  printf("    - Promotions:       %zu\n", promotions);
+  printf("    - Demotions:        %zu\n", stats_.demotions.load());
+  printf("    - Rebalancer skips: %zu\n", stats_.rebalancer_skips.load());
   printf("=================================================================\n");
 }
 
@@ -265,7 +274,7 @@ void Swapper::swap_out_page(Page *page) {
        cache_gva, mapper_t::gva_to_gpa((void *)cache_gva));
 
   storage_->write_page((void *)cache_gva, victim_offset);
-  vaddr_state_map_[victim_vaddr] = PageState::RemotelyMapped;
+  heap_state_map_[victim_vaddr] = PageState::RemotelyMapped;
 
   stats_.swap_outs++;
   /*
@@ -273,8 +282,8 @@ void Swapper::swap_out_page(Page *page) {
     INFO("Page %zu (GVA 0x%lx) is CLEAN. Skipping write-back.",
          (size_t)(page - pages_.get()), victim_vaddr);
 
-    vaddr_state_map_[victim_vaddr] = PageState::Unmapped;
-    // vaddr_state_map_.erase(victim_vaddr);
+    heap_state_map_[victim_vaddr] = PageState::Unmapped;
+    // heap_state_map_.erase(victim_vaddr);
     stats_.clean_evictions++;
   }
   */
@@ -286,6 +295,8 @@ void Swapper::swap_out_page(Page *page) {
 }
 
 void Swapper::handle_fault(void *fault_addr, regstate_t *regstate) {
+  UNUSED(regstate);
+
   DEBUG("Handling fault at %p. Error code: %lu", fault_addr,
         regstate->error_code);
 
@@ -304,8 +315,8 @@ void Swapper::handle_fault(void *fault_addr, regstate_t *regstate) {
 
   std::lock_guard<std::mutex> lock(pages_mutex_);
 
-  PageState page_state = vaddr_state_map_.contains(aligned_fault_vaddr)
-                             ? vaddr_state_map_.at(aligned_fault_vaddr)
+  PageState page_state = heap_state_map_.contains(aligned_fault_vaddr)
+                             ? heap_state_map_.at(aligned_fault_vaddr)
                              : PageState::Unmapped;
 
   Page *page = acquire_page();
@@ -328,18 +339,16 @@ void Swapper::handle_fault(void *fault_addr, regstate_t *regstate) {
                 page_state_to_str(page_state), aligned_fault_vaddr);
   }
 
-  vaddr_state_map_[aligned_fault_vaddr] = PageState::Mapped;
+  heap_state_map_[aligned_fault_vaddr] = PageState::Mapped;
   active_pages_.push_front(page);
 
   // print_state(false);
 }
 
 void Swapper::demote_cold_pages() {
-  std::lock_guard<std::mutex> lock(pages_mutex_);
-  // DEBUG("----------START DEMOTE----------");
-  // printf("DEMOTION\n");
+  // std::lock_guard<std::mutex> lock(pages_mutex_);
 
-  // iterate from the back (oldest hot page) to the front (newest hot page)
+  // iterate from the back (warm pages) to the front (hottest pages)
   for (auto it = active_pages_.rbegin(); it != active_pages_.rend();) {
     auto hot_page = *it;
 
@@ -348,9 +357,6 @@ void Swapper::demote_cold_pages() {
       // page is still hot, clear the A-bit and keep it in the active list
       clear_permissions(hot_page->vaddr, PTE_A);
       ++it;
-
-      // DEBUG("Page %zu is still hot, giving another chance",
-      // get_page_idx(hot_page));
     } else {
       // page has become cold, demote it to the inactive list
       inactive_pages_.push_front(hot_page);
@@ -360,19 +366,12 @@ void Swapper::demote_cold_pages() {
           active_pages_.erase(std::next(it).base()));
 
       stats_.demotions++;
-
-      // DEBUG("Demoted page %zu (gva 0x%lx) to inactive list",
-      //       get_page_idx(hot_page), hot_page->vaddr);
     }
   }
-
-  // DEBUG("----------END DEMOTE----------");
 }
 
 void Swapper::promote_hot_pages() {
-  std::lock_guard<std::mutex> lock(pages_mutex_);
-  // DEBUG("----------START PROMOTE----------");
-  // printf("PROMOTION\n");
+  // std::lock_guard<std::mutex> lock(pages_mutex_);
 
   for (auto it = inactive_pages_.begin(); it != inactive_pages_.end();) {
     auto cold_page = *it;
@@ -385,40 +384,26 @@ void Swapper::promote_hot_pages() {
       clear_permissions(cold_page->vaddr, PTE_A);
 
       stats_.promotions++;
-      // DEBUG("Promoted page %zu (gva 0x%lx) to active list",
-      //       get_page_idx(cold_page), cold_page->vaddr);
     } else {
       // page is still cold, keep it in the inactive list
       ++it;
-      // DEBUG("Page %zu is still cold", get_page_idx(cold_page));
     }
   }
-
-  // DEBUG("----------END PROMOTE----------");
 }
 
 void Swapper::reap_cold_pages() {
-  std::lock_guard<std::mutex> lock(pages_mutex_);
-  // DEBUG("----------START REAP----------");
+  // std::lock_guard<std::mutex> lock(pages_mutex_);
 
   // try to keep some amount of free space in the cache
   while (free_pages_.size() < REAP_RESERVE && !inactive_pages_.empty()) {
     Page *victim_page = inactive_pages_.back();
     inactive_pages_.pop_back();
 
-    // uptr victim_gva = victim_page->vaddr;
-
     swap_out_page(victim_page);
-
     free_pages_.push_back(victim_page);
 
     stats_.proactive_evictions++;
-
-    // DEBUG("Reaped page %zu (GVA 0x%lx) to maintain some amount of free
-    // pages",
-    //       get_page_idx(victim_page), victim_gva);
   }
-  // DEBUG("----------END REAP----------");
 }
 
 void Swapper::adapt_rebalance_interval() {

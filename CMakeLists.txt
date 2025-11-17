@@ -52,6 +52,25 @@ else()
   message(FATAL_ERROR "RDMA libraries not found. Ensure they are installed correctly.")
 endif()
 
+# Find the pre-built YCSB-like benchmark library
+find_library(KV_BENCHMARK_LIBRARY NAMES benchmark # The library name (libbenchmark.so)
+             HINTS "$ENV{HOME}/desk/benchmark/build/lib"
+             REQUIRED)
+if(KV_BENCHMARK_LIBRARY)
+  message(STATUS "Found KV Benchmark library: ${KV_BENCHMARK_LIBRARY}")
+else()
+  message(FATAL_ERROR "KV Benchmark library not found.")
+endif()
+# Also find its include directory
+find_path(KV_BENCHMARK_INCLUDE_DIR NAMES benchmark/benchmark.h
+          HINTS "$ENV{HOME}/desk/benchmark/include"
+          REQUIRED)
+if(KV_BENCHMARK_INCLUDE_DIR)
+  message(STATUS "Found KV Benchmark include directory: ${KV_BENCHMARK_INCLUDE_DIR}")
+else()
+  message(FATAL_ERROR "KV Benchmark include directory not found.")
+endif()
+
 # Helper target that carries the shared link/include settings
 add_library(common INTERFACE)
 # Allow `#include "foo.h"` instead of `#include "src/foo.h"`
@@ -89,7 +108,8 @@ add_executable(client
   ${SRC}/rdma/client.cpp
   ${SRC}/storage/rdma_storage.cpp
 )
-target_link_libraries(client PRIVATE common ${IBVERBS_LIBRARY} ${RDMACM_LIBRARY})
+target_link_libraries(client PRIVATE common ${IBVERBS_LIBRARY} ${RDMACM_LIBRARY} ${KV_BENCHMARK_LIBRARY})
+target_include_directories(client SYSTEM PRIVATE ${KV_BENCHMARK_INCLUDE_DIR})
 
 # Shared library to inject the swapper into applications via LD_PRELOAD
 add_library(lethe SHARED
@@ -108,30 +128,9 @@ target_link_libraries(lethe PRIVATE
 # Place the shared library under '/build/lib'
 set_target_properties(lethe PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
-# Find the pre-built YCSB-like benchmark library
-find_library(KV_BENCHMARK_LIBRARY NAMES benchmark # The library name (libbenchmark.so)
-             HINTS "$ENV{HOME}/desk/benchmark/build/lib"
-             REQUIRED)
-if(KV_BENCHMARK_LIBRARY)
-  message(STATUS "Found KV Benchmark library: ${KV_BENCHMARK_LIBRARY}")
-else()
-  message(FATAL_ERROR "KV Benchmark library not found.")
-endif()
-# Also find its include directory
-find_path(KV_BENCHMARK_INCLUDE_DIR NAMES benchmark/benchmark.h
-          HINTS "$ENV{HOME}/desk/benchmark/include"
-          REQUIRED)
-if(KV_BENCHMARK_INCLUDE_DIR)
-  message(STATUS "Found KV Benchmark include directory: ${KV_BENCHMARK_INCLUDE_DIR}")
-else()
-  message(FATAL_ERROR "KV Benchmark include directory not found.")
-endif()
-
 # Executable for running the benchmark
 add_executable(run_benchmark
-  # Main entry point for the benchmark runner
   ${SRC}/benchmark/run_benchmark.cpp
-  ${SRC}/benchmark/heap_allocator.cpp
 )
 # Link the benchmark runner against the pre-built benchmark library
 target_link_libraries(run_benchmark PRIVATE ${KV_BENCHMARK_LIBRARY})

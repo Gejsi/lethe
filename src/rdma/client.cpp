@@ -1,8 +1,11 @@
+#include <benchmark/benchmark.h>
 #include <cstdio>
 #include <volimem/mapper.h>
 #include <volimem/vcpu.h>
 #include <volimem/volimem.h>
 
+#include "benchmark/bump_map.h"
+// #include "benchmark/linked_bump_map.h"
 #include "common_client.h"
 #include "storage/rdma_storage.h"
 
@@ -20,7 +23,7 @@ void handle_fault(void *fault_addr, regstate_t *regstate) {
 }
 
 void virtual_main(void *any) {
-  UNUSED(any);
+  s_benchmark_config_t *bench_config = (s_benchmark_config_t *)any;
 
   DEBUG("--- Inside VM ---");
   DEBUG("Running on the vCPU apic %lu", local_vcpu->lapic_id);
@@ -31,43 +34,10 @@ void virtual_main(void *any) {
   INFO("Fault handling segment registered: [0x%lx, 0x%lx)", HEAP_START,
        (uptr)HEAP_START + HEAP_SIZE);
 
-  g_swapper->start_background_rebalancing();
+  // g_swapper->start_background_rebalancing();
 
-  // ============================================================
-  // MANUAL TESTING
-  // ============================================================
-
-  volatile u32 *p[NUM_PAGES * 2];
-  for (size_t i = 0; i < NUM_PAGES * 2; ++i) {
-    p[i] = (volatile u32 *)(HEAP_START + i * PAGE_SIZE);
-  }
-
-  // ===== 1. Stable State =====
-  INFO("\n[1] Letting system stabilize for 2 seconds...");
-  sleep_ms(2000);
-  // EXPECT in logs: The rebalance interval should slowly increase.
-
-  // ===== 2. Apply High Pressure =====
-  INFO("\n[2] Applying high memory pressure...");
-  // Rapidly access more pages than are in the cache.
-  // This will cause many synchronous evictions.
-  for (size_t i = 0; i < NUM_PAGES + 4; ++i) {
-    *p[i] = (u32)i;
-  }
-  INFO("✓ Pressure phase complete.");
-  // EXPECT in logs: "[ADAPT] High pressure! ... Reducing sleep..."
-
-  // ===== 3. Release Pressure & Observe Relaxation =====
-  INFO("\n[3] Releasing pressure. Waiting for system to relax...");
-  // Now, just access a small working set of pages.
-  // No more synchronous evictions should occur.
-  for (int cycle = 0; cycle < 30; ++cycle) {
-    *p[0]; // Just touch the first page
-    sleep_ms(100);
-  }
-  INFO("✓ Cooldown phase complete.");
-  // EXPECT in logs: After a while, you should start seeing
-  // "[ADAPT] System stable. Increasing sleep..."
+  BumpMapDataLayer data_layer;
+  run_benchmark(bench_config, &data_layer);
 
   g_swapper->print_stats();
 
@@ -75,6 +45,31 @@ void virtual_main(void *any) {
 }
 
 int main(int argc, char **argv) {
+  if (argc < 6) {
+    printf("Usage: %s <NUM_THREADS> <LOAD_NUM_KEYS> <NUM_OPS> <DISTRIBUTION> "
+           "<WORKLOAD>\n",
+           argv[0]);
+    exit(1);
+  }
+  const unsigned int num_threads = (unsigned int)atoi(argv[1]);
+  const unsigned int load_num_keys = (unsigned int)atoi(argv[2]);
+  const unsigned int num_ops = (unsigned int)atoi(argv[3]);
+  const enum distribution distribution =
+      strcmp(argv[4], "uniform") == 0 ? UNIFORM : ZIPFIAN;
+  const uint8_t workload = (uint8_t)atoi(argv[5]);
+
+  s_benchmark_config_t bench_config{.num_threads = num_threads,
+                                    .load_num_keys = load_num_keys,
+                                    .num_ops = num_ops,
+                                    .distribution = distribution,
+                                    .workload = workload,
+                                    .output_file = "./multidata/outputfile",
+                                    .data_dir = "./multidata",
+                                    .tsc = 2095008,
+                                    .metric = METRIC::THROUGHPUT,
+                                    .hook = NULL,
+                                    .args = NULL};
+
   struct sockaddr_in server_sockaddr;
   memset(&server_sockaddr, 0, sizeof(server_sockaddr));
   server_sockaddr.sin_family = AF_INET;
@@ -158,7 +153,7 @@ int main(int argc, char **argv) {
         .guest_page_type = VOLIMEM_NORMAL_PAGES,
         .print_kvm_stats = false};
     volimem_set_config(&voli_config);
-    volimem_start(nullptr, virtual_main);
+    volimem_start(&bench_config, virtual_main);
   }
 
   ret = disconnect_and_cleanup();
