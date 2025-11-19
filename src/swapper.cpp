@@ -33,7 +33,8 @@ void unmap_gva(uptr gva) {
 }
 
 Swapper::Swapper(std::unique_ptr<Storage> storage)
-    : storage_(std::move(storage)) {
+    : storage_(std::move(storage)), pages_(std::make_unique<Page[]>(NUM_PAGES)),
+      page_states_(std::make_unique<std::atomic<PageState>[]>(NUM_HEAP_PAGES)) {
 
   cache_base_addr_ = storage_->get_cache_base_addr();
   if (!cache_base_addr_) {
@@ -41,9 +42,12 @@ Swapper::Swapper(std::unique_ptr<Storage> storage)
         "Swapper initialized with a storage backend that has no cache address");
   }
 
-  pages_ = std::make_unique<Page[]>(NUM_PAGES);
   for (size_t i = 0; i < NUM_PAGES; i++) {
     free_pages_.push_back(&pages_[i]);
+  }
+
+  for (size_t i = 0; i < NUM_HEAP_PAGES; ++i) {
+    page_states_[i].store(PageState::Unmapped, std::memory_order_relaxed);
   }
 
   INFO("Swapper initialized with %zu cache pages.", NUM_PAGES);
@@ -76,12 +80,7 @@ void Swapper::start_background_rebalancing() {
   rebalance_thread_.detach();
 }
 
-void Swapper::print_state(bool use_lock) {
-  std::unique_ptr<std::lock_guard<std::mutex>> lock;
-  if (use_lock) {
-    lock = std::make_unique<std::lock_guard<std::mutex>>(pages_mutex_);
-  }
-
+void Swapper::print_state() {
   printf("Num pages: %zu -> Free: %zu, Inactive: %zu, Active: %zu\n", NUM_PAGES,
          free_pages_.size(), inactive_pages_.size(), active_pages_.size());
 
@@ -100,9 +99,19 @@ void Swapper::print_state(bool use_lock) {
     p->print();
   }
 
-  printf("=== Mappings (%zu) ===\n", heap_state_map_.size());
-  for (auto p : heap_state_map_) {
-    printf("0x%lx -> %s\n", p.first, page_state_to_str(p.second));
+  size_t mapped_count = 0;
+  for (size_t i = 0; i < NUM_HEAP_PAGES; ++i) {
+    if (page_states_[i].load() != PageState::Unmapped) {
+      mapped_count++;
+    }
+  }
+  printf("=== Mappings (%zu) ===\n", mapped_count);
+  for (size_t i = 0; i < NUM_HEAP_PAGES; ++i) {
+    PageState state = page_states_[i].load();
+    if (state != PageState::Unmapped) {
+      uptr vaddr = HEAP_START + (i * PAGE_SIZE);
+      printf("0x%lx -> %s\n", vaddr, page_state_to_str(state));
+    }
   }
 }
 
@@ -204,6 +213,10 @@ uptr Swapper::get_cache_gva(Page *page) {
   return (uptr)cache_base_addr_ + cache_offset;
 }
 
+usize Swapper::get_heap_idx(uptr vaddr) {
+  return (vaddr - HEAP_START) / PAGE_SIZE;
+}
+
 Page *Swapper::acquire_page() {
   if (!free_pages_.empty()) {
     auto page = free_pages_.front();
@@ -274,7 +287,7 @@ void Swapper::swap_out_page(Page *page) {
        cache_gva, mapper_t::gva_to_gpa((void *)cache_gva));
 
   storage_->write_page((void *)cache_gva, victim_offset);
-  heap_state_map_[victim_vaddr] = PageState::RemotelyMapped;
+  page_states_[get_heap_idx(victim_vaddr)] = PageState::RemotelyMapped;
 
   stats_.swap_outs++;
   /*
@@ -290,8 +303,6 @@ void Swapper::swap_out_page(Page *page) {
 
   unmap_gva(victim_vaddr);
   page->reset();
-
-  // print_state(false);
 }
 
 void Swapper::handle_fault(void *fault_addr, regstate_t *regstate) {
@@ -313,36 +324,36 @@ void Swapper::handle_fault(void *fault_addr, regstate_t *regstate) {
 
   stats_.total_faults++;
 
-  std::lock_guard<std::mutex> lock(pages_mutex_);
+  usize heap_idx = get_heap_idx(aligned_fault_vaddr);
+  PageState page_state = page_states_[heap_idx].load();
 
-  PageState page_state = heap_state_map_.contains(aligned_fault_vaddr)
-                             ? heap_state_map_.at(aligned_fault_vaddr)
-                             : PageState::Unmapped;
+  {
+    std::lock_guard<std::mutex> lock(pages_mutex_);
 
-  Page *page = acquire_page();
+    Page *page = acquire_page();
 
-  if (page_state == PageState::Unmapped) {
-    DEBUG("Assigning page for gva 0x%lx", aligned_fault_vaddr);
-    // TODO: this logic is almost identical to the swap-in,
-    // but without the RDMA read. Refactor this.
-    auto cache_gva = get_cache_gva(page);
-    memset((void *)cache_gva, 0, PAGE_SIZE);
-    auto cache_gpa = mapper_t::gva_to_gpa((void *)cache_gva);
-    map_gva(aligned_fault_vaddr, cache_gpa);
-    page->vaddr = aligned_fault_vaddr;
-    stats_.demand_zeros++;
-  } else if (page_state == PageState::RemotelyMapped) {
-    swap_in_page(page, aligned_fault_vaddr);
-    stats_.swap_ins++;
-  } else {
-    UNREACHABLE("A %s page (0x%lx) shouldn't cause a fault.",
-                page_state_to_str(page_state), aligned_fault_vaddr);
+    if (page_state == PageState::Unmapped) {
+      DEBUG("Assigning page for gva 0x%lx", aligned_fault_vaddr);
+      // TODO: this logic is almost identical to the swap-in,
+      // but without the RDMA read. Refactor this.
+      auto cache_gva = get_cache_gva(page);
+      memset((void *)cache_gva, 0, PAGE_SIZE);
+      auto cache_gpa = mapper_t::gva_to_gpa((void *)cache_gva);
+      map_gva(aligned_fault_vaddr, cache_gpa);
+      page->vaddr = aligned_fault_vaddr;
+      stats_.demand_zeros++;
+    } else if (page_state == PageState::RemotelyMapped) {
+      swap_in_page(page, aligned_fault_vaddr);
+      stats_.swap_ins++;
+    } else {
+      UNREACHABLE("A %s page (0x%lx) shouldn't cause a fault.",
+                  page_state_to_str(page_state), aligned_fault_vaddr);
+    }
+
+    active_pages_.push_front(page);
   }
 
-  heap_state_map_[aligned_fault_vaddr] = PageState::Mapped;
-  active_pages_.push_front(page);
-
-  // print_state(false);
+  page_states_[heap_idx] = PageState::Mapped;
 }
 
 void Swapper::demote_cold_pages() {

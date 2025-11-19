@@ -20,6 +20,7 @@ constexpr usize REAP_RESERVE = (usize)(NUM_PAGES * 0.2);
 constexpr usize SWAP_SIZE = 256 * MB;
 constexpr usize HEAP_SIZE = CACHE_SIZE + SWAP_SIZE;
 constexpr uptr HEAP_START = 0xffff800000000000;
+constexpr usize NUM_HEAP_PAGES = HEAP_SIZE / PAGE_SIZE;
 
 enum class PageState : u8 { Unmapped, Mapped, RemotelyMapped };
 
@@ -102,7 +103,7 @@ public:
   // Reap: proactively free up cold pages if below a reserve target
   void reap_cold_pages();
 
-  void print_state(bool use_lock = true);
+  void print_state();
 
   void print_stats();
 
@@ -110,10 +111,12 @@ private:
   void swap_in_page(Page *page, uptr aligned_fault_vaddr);
   void swap_out_page(Page *page);
 
-  // Returns the index of the slot where a page is located
+  // Returns the index of the cache slot where a page is located
   usize get_page_idx(Page *page);
   // Returns the GVA associated with a page
   uptr get_cache_gva(Page *page);
+  // Returns the index of the heap slot where a page is located
+  usize get_heap_idx(uptr vaddr);
 
   /**
    * @brief Acquires a free physical page slot to service a page fault.
@@ -164,8 +167,8 @@ private:
   std::list<Page *> inactive_pages_;
   std::list<Page *> free_pages_;
 
-  // Map tracking the state of every faulted virtual address
-  std::unordered_map<uptr, PageState> heap_state_map_;
+  // Track the state of all pages, both on the cache and on the swap area
+  std::unique_ptr<std::atomic<PageState>[]> page_states_;
 
   // Guards access to all cache metadata
   std::mutex pages_mutex_;

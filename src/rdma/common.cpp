@@ -1,3 +1,4 @@
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
 
@@ -94,7 +95,7 @@ int process_rdma_cm_event(struct rdma_event_channel *echannel,
   }
   /* check if it's a good event */
   if ((*cm_event)->status != 0) {
-    ERROR("CM event has non zero status: %d", (*cm_event)->status);
+    ERROR("CM event has non zero status: %s", strerror((*cm_event)->status));
     ret = -((*cm_event)->status);
     /* important, we acknowledge the event */
     rdma_ack_cm_event(*cm_event);

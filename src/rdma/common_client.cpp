@@ -188,7 +188,7 @@ int connect_to_server() {
   ret = process_rdma_cm_event(cm_event_channel, RDMA_CM_EVENT_ESTABLISHED,
                               &cm_event);
   if (ret) {
-    ERROR("Failed to get cm event, ret = %d ", ret);
+    ERROR("Failed to get cm event: %d", ret);
     return ret;
   }
   ret = rdma_ack_cm_event(cm_event);

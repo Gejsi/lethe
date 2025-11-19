@@ -1,11 +1,13 @@
 #include <benchmark/benchmark.h>
 #include <cstdio>
+#include <cstdlib>
 #include <volimem/mapper.h>
 #include <volimem/vcpu.h>
 #include <volimem/volimem.h>
 
 #include "benchmark/bump_map.h"
-// #include "benchmark/linked_bump_map.h"
+#include "benchmark/linked_bump_map.h"
+#include "benchmark/std_map.h"
 #include "common_client.h"
 #include "storage/rdma_storage.h"
 
@@ -17,24 +19,24 @@ void usage() {
 }
 
 void handle_fault(void *fault_addr, regstate_t *regstate) {
-  ENSURE(g_swapper != nullptr, "Swapper not setup");
+  if (!g_swapper) {
+    PANIC("Swapper not setup");
+  }
 
   g_swapper->handle_fault(fault_addr, regstate);
 }
 
 void virtual_main(void *any) {
-  s_benchmark_config_t *bench_config = (s_benchmark_config_t *)any;
-
   DEBUG("--- Inside VM ---");
-  DEBUG("Running on the vCPU apic %lu", local_vcpu->lapic_id);
-  DEBUG("Root page table is at %p", (void *)mapper_t::get_root());
+
+  s_benchmark_config_t *bench_config = (s_benchmark_config_t *)any;
 
   auto seg = new segment_t(HEAP_SIZE, HEAP_START);
   mapper_t::assign_handler(seg, handle_fault);
   INFO("Fault handling segment registered: [0x%lx, 0x%lx)", HEAP_START,
        (uptr)HEAP_START + HEAP_SIZE);
 
-  // g_swapper->start_background_rebalancing();
+  g_swapper->start_background_rebalancing();
 
   BumpMapDataLayer data_layer;
   run_benchmark(bench_config, &data_layer);
@@ -63,8 +65,8 @@ int main(int argc, char **argv) {
                                     .num_ops = num_ops,
                                     .distribution = distribution,
                                     .workload = workload,
-                                    .output_file = "./multidata/outputfile",
-                                    .data_dir = "./multidata",
+                                    .output_file = "./data/outputfile",
+                                    .data_dir = "./data",
                                     .tsc = 2095008,
                                     .metric = METRIC::THROUGHPUT,
                                     .hook = NULL,
