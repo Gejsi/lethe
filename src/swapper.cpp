@@ -229,14 +229,12 @@ Page *Swapper::acquire_page() {
   if (!inactive_pages_.empty()) {
     victim_page = inactive_pages_.back();
     inactive_pages_.pop_back();
-    DEBUG("ACQUIRE_PAGE: Free list empty. Chose victim GVA 0x%lx from inactive "
-          "list.",
+    DEBUG("Free list empty. Chose victim GVA 0x%lx from inactive list",
           victim_page->vaddr);
   } else if (!active_pages_.empty()) {
     victim_page = active_pages_.back();
     active_pages_.pop_back();
-    DEBUG("ACQUIRE_PAGE: Free list empty. Chose victim GVA 0x%lx from active "
-          "list.",
+    DEBUG("Free list empty. Chose victim GVA 0x%lx from active list",
           victim_page->vaddr);
   } else {
     UNREACHABLE("No pages available to evict from any list");
@@ -255,21 +253,36 @@ Page *Swapper::acquire_page() {
   return victim_page;
 }
 
-void Swapper::swap_in_page(Page *page, uptr aligned_fault_vaddr) {
-  auto target_offset = aligned_fault_vaddr - HEAP_START;
+void Swapper::swap_in_page(Page *page, uptr aligned_fault_vaddr,
+                           PageState page_state) {
   auto cache_gva = get_cache_gva(page);
   auto cache_gpa = mapper_t::gva_to_gpa((void *)cache_gva);
 
-  INFO("Swapping IN: 0x%lx into cache slot %zu. Cache (gva->gpa): 0x%lx->0x%lx",
-       aligned_fault_vaddr, get_page_idx(page), cache_gva, cache_gpa);
+  if (page_state == PageState::Unmapped) {
+    DEBUG("Assigning page for gva 0x%lx", aligned_fault_vaddr);
+    memset((void *)cache_gva, 0, PAGE_SIZE);
+    stats_.demand_zeros++;
+  } else if (page_state == PageState::RemotelyMapped) {
+    INFO("Swapping IN: 0x%lx into cache slot %zu. Cache (gva->gpa): "
+         "0x%lx->0x%lx",
+         aligned_fault_vaddr, get_page_idx(page), cache_gva, cache_gpa);
 
-  int ret = storage_->read_page((void *)cache_gva, target_offset);
-  if (ret != 0) {
-    ERROR("Failed to swap in: Backend read failed (%d)", ret);
-    // NOTE: Robust error handling would be needed here.
-    return;
+    auto target_offset = aligned_fault_vaddr - HEAP_START;
+    int ret = storage_->read_page((void *)cache_gva, target_offset);
+    if (ret != 0) {
+      ERROR("Failed to swap in: Backend read failed (%d)", ret);
+      // NOTE: Robust error handling would be needed here.
+      return;
+    }
+
+    stats_.swap_ins++;
+  } else {
+    UNREACHABLE(
+        "A %s page (0x%lx) shouldn't cause a fault that needs a swap-in",
+        page_state_to_str(page_state), aligned_fault_vaddr);
   }
 
+  page_states_[get_heap_idx(aligned_fault_vaddr)] = PageState::Mapped;
   map_gva(aligned_fault_vaddr, cache_gpa);
   page->vaddr = aligned_fault_vaddr;
 }
@@ -327,33 +340,12 @@ void Swapper::handle_fault(void *fault_addr, regstate_t *regstate) {
   usize heap_idx = get_heap_idx(aligned_fault_vaddr);
   PageState page_state = page_states_[heap_idx].load();
 
-  {
-    std::lock_guard<std::mutex> lock(pages_mutex_);
+  std::lock_guard<std::mutex> lock(pages_mutex_);
 
-    Page *page = acquire_page();
+  Page *page = acquire_page();
+  swap_in_page(page, aligned_fault_vaddr, page_state);
 
-    if (page_state == PageState::Unmapped) {
-      DEBUG("Assigning page for gva 0x%lx", aligned_fault_vaddr);
-      // TODO: this logic is almost identical to the swap-in,
-      // but without the RDMA read. Refactor this.
-      auto cache_gva = get_cache_gva(page);
-      memset((void *)cache_gva, 0, PAGE_SIZE);
-      auto cache_gpa = mapper_t::gva_to_gpa((void *)cache_gva);
-      map_gva(aligned_fault_vaddr, cache_gpa);
-      page->vaddr = aligned_fault_vaddr;
-      stats_.demand_zeros++;
-    } else if (page_state == PageState::RemotelyMapped) {
-      swap_in_page(page, aligned_fault_vaddr);
-      stats_.swap_ins++;
-    } else {
-      UNREACHABLE("A %s page (0x%lx) shouldn't cause a fault.",
-                  page_state_to_str(page_state), aligned_fault_vaddr);
-    }
-
-    active_pages_.push_front(page);
-  }
-
-  page_states_[heap_idx] = PageState::Mapped;
+  active_pages_.push_front(page);
 }
 
 void Swapper::demote_cold_pages() {

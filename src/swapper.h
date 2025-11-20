@@ -5,7 +5,6 @@
 #include <list>
 #include <memory>
 #include <thread>
-#include <unordered_map>
 #include <volimem/idt.h>
 
 #include "storage/storage.h"
@@ -108,7 +107,8 @@ public:
   void print_stats();
 
 private:
-  void swap_in_page(Page *page, uptr aligned_fault_vaddr);
+  // TODO: improve error handling of these two methods
+  void swap_in_page(Page *page, uptr aligned_fault_vaddr, PageState page_state);
   void swap_out_page(Page *page);
 
   // Returns the index of the cache slot where a page is located
