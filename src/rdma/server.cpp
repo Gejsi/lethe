@@ -500,9 +500,10 @@ int main(int argc, char **argv) {
   ret = disconnect_and_cleanup();
   if (ret) {
     ERROR("Failed to clean up resources properly, ret = %d", ret);
+    return ret;
   }
 
-  return ret;
+  return EXIT_SUCCESS;
 
 cleanup_error:
   ERROR("An error occurred. Cleaning up resources.");

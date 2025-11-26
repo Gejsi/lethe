@@ -71,24 +71,24 @@ public:
   BumpMapDataLayer() = default;
 
   int insert(uint64_t key, uint64_t value) override {
-    // std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> lock(mutex_);
     map_[key] = value;
     return 0;
   }
 
   int update(uint64_t key, uint64_t value) override {
-    // std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> lock(mutex_);
     map_[key] = value;
     return 1;
   }
 
   uint64_t remove(uint64_t key) override {
-    // std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> lock(mutex_);
     return map_.erase(key);
   }
 
   uint64_t get(uint64_t key) override {
-    // std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> lock(mutex_);
     try {
       return map_.at(key);
     } catch (const std::out_of_range &oor) {
@@ -97,12 +97,12 @@ public:
   }
 
   int is_null(uint64_t key) override {
-    // std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> lock(mutex_);
     return map_.count(key) == 0;
   }
 
   uint64_t dummy() override {
-    // std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> lock(mutex_);
     return map_.size();
   };
 
@@ -115,5 +115,5 @@ private:
       BumpAllocator<std::pair<const uint64_t, uint64_t>>> // Allocator
       map_;
 
-  // std::mutex mutex_;
+  std::mutex mutex_;
 };

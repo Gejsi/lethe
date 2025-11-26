@@ -36,7 +36,10 @@ void virtual_main(void *any) {
   INFO("Fault handling segment registered: [0x%lx, 0x%lx)", HEAP_START,
        (uptr)HEAP_START + HEAP_SIZE);
 
-  g_swapper->start_background_rebalancing();
+  const char *rebalancer_env = std::getenv("REBALANCE");
+  if (rebalancer_env && std::string(rebalancer_env) == "1") {
+    g_swapper->launch_background_rebalancing();
+  }
 
   BumpMapDataLayer data_layer;
   run_benchmark(bench_config, &data_layer);
@@ -160,8 +163,9 @@ int main(int argc, char **argv) {
 
   ret = disconnect_and_cleanup();
   if (ret) {
-    ERROR("Failed to cleanly disconnect and clean up resources ");
+    ERROR("Failed to cleanly disconnect and clean up resources");
+    return ret;
   }
 
-  return ret;
+  return EXIT_SUCCESS;
 }

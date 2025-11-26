@@ -62,7 +62,7 @@ static void virtual_main(void *any) {
   INFO("Fault handling segment registered: [0x%lx, 0x%lx)", HEAP_START,
        (uptr)HEAP_START + HEAP_SIZE);
 
-  // g_swapper->start_background_rebalancing();
+  // g_swapper->launch_background_rebalancing();
 
   params->__libc_start_main(params->main, params->argc, params->argv,
                             params->init, params->fini, params->rtld_fini,

@@ -4,22 +4,34 @@
 #include <cstdlib>
 #include <list>
 #include <memory>
-#include <thread>
+#include <vector>
 #include <volimem/idt.h>
 
+#include "concurrentqueue.h"
 #include "storage/storage.h"
 #include "utils.h"
 
 constexpr usize PAGE_SIZE = 4 * KB;
-constexpr usize CACHE_SIZE = 64 * MB;
+constexpr usize CACHE_SIZE = 112 * MB;
 constexpr usize NUM_PAGES = CACHE_SIZE / PAGE_SIZE;
-// constexpr usize NUM_PAGES = 4;
-constexpr usize REAP_RESERVE = (usize)(NUM_PAGES * 0.2);
-// constexpr usize REAP_RESERVE = 1;
 constexpr usize SWAP_SIZE = 256 * MB;
 constexpr usize HEAP_SIZE = CACHE_SIZE + SWAP_SIZE;
 constexpr uptr HEAP_START = 0xffff800000000000;
 constexpr usize NUM_HEAP_PAGES = HEAP_SIZE / PAGE_SIZE;
+constexpr usize NUM_SHARDS = 16;
+constexpr usize REAP_RESERVE = (usize)(NUM_PAGES * 0.2);
+constexpr usize SHARD_REAP_RESERVE = REAP_RESERVE / NUM_SHARDS;
+
+void set_permissions(uptr vaddr, u64 flags);
+void clear_permissions(uptr vaddr, u64 flags);
+constexpr bool pte_is_present(u64 pte);
+constexpr bool pte_is_writable(u64 pte);
+constexpr bool pte_is_accessed(u64 pte);
+constexpr bool pte_is_dirty(u64 pte);
+// Map a virtual page to a physical page
+void map_gva(uptr gva, uptr gpa);
+// Unmap a page from the guest page table
+void unmap_gva(uptr gva);
 
 enum class PageState : u8 { Unmapped, Mapped, RemotelyMapped };
 
@@ -55,16 +67,18 @@ struct Page {
   }
 };
 
-void set_permissions(uptr vaddr, u64 flags);
-void clear_permissions(uptr vaddr, u64 flags);
-bool pte_is_present(u64 pte);
-bool pte_is_writable(u64 pte);
-bool pte_is_accessed(u64 pte);
-bool pte_is_dirty(u64 pte);
-// Map a virtual page to a physical page
-void map_gva(uptr gva, uptr gpa);
-// Unmap a page from the guest page table
-void unmap_gva(uptr gva);
+struct alignas(64) Shard {
+  std::mutex mutex;
+
+  // Lists used to organize the pages with a LRU policy
+  std::list<Page *> active_pages;
+  std::list<Page *> inactive_pages;
+  // std::list<Page *> free_pages;
+
+  // save the oldest page (back of inactive list).
+  // 0 = Empty, UINT64_MAX = Newest.
+  std::atomic<u64> oldest_age{0};
+};
 
 struct SwapperStats {
   std::atomic<usize> total_faults = 0;
@@ -93,14 +107,14 @@ public:
   void handle_fault(void *fault_addr, regstate_t *regstate);
 
   // Starts the background thread for LRU rebalancing
-  void start_background_rebalancing();
+  void launch_background_rebalancing();
 
   // Demotion: hot -> cold
-  void demote_cold_pages();
+  void demote_cold_pages(Shard &shard);
   // Promotion: cold -> hot
-  void promote_hot_pages();
-  // Reap: proactively free up cold pages if below a reserve target
-  void reap_cold_pages();
+  void promote_hot_pages(Shard &shard);
+  // Reap: proactively reclaim cold pages if below a reserve target
+  void reap_cold_pages(Shard &shard);
 
   void print_state();
 
@@ -108,7 +122,7 @@ public:
 
 private:
   // TODO: improve error handling of these two methods
-  void swap_in_page(Page *page, uptr aligned_fault_vaddr, PageState page_state);
+  void swap_in_page(Page *page, uptr aligned_fault_vaddr);
   void swap_out_page(Page *page);
 
   // Returns the index of the cache slot where a page is located
@@ -117,6 +131,8 @@ private:
   uptr get_cache_gva(Page *page);
   // Returns the index of the heap slot where a page is located
   usize get_heap_idx(uptr vaddr);
+  // Returns the index of the shard where a page is handled
+  usize get_shard_idx(uptr vaddr);
 
   /**
    * @brief Acquires a free physical page slot to service a page fault.
@@ -154,36 +170,32 @@ private:
    *
    * @note This function assumes the caller holds the pages_mutex_.
    */
-  Page *acquire_page();
+  Page *acquire_page(Shard &shard);
 
   std::unique_ptr<Storage> storage_; // The abstract storage backend
   void *cache_base_addr_;            // The base address of the cache
   // Fixed-size array describing where a faulting address
   // is located in the physical cache
   std::unique_ptr<Page[]> pages_;
-  // Lists used to organize the pages based on their
-  // usage (hot, cold, or free) for the LRU algorithm
-  std::list<Page *> active_pages_;
-  std::list<Page *> inactive_pages_;
-  std::list<Page *> free_pages_;
+  // List of unmapped pages in the cache
+  // TODO: implement my own simpler lock-free queue
+  moodycamel::ConcurrentQueue<Page *> free_pages_queue_;
+
+  std::vector<Shard> shards_;
 
   // Track the state of all pages, both on the cache and on the swap area
   std::unique_ptr<std::atomic<PageState>[]> page_states_;
 
-  // Guards access to all cache metadata
-  std::mutex pages_mutex_;
-
-  std::thread rebalance_thread_;
   // how often the rebalance thread runs, recomputed at runtime
   u32 rebalance_interval_ms_ = 200;
   // shared between fault handler and the rebalance thread
   std::atomic<u32> evictions_in_cycle_ = 0;
   // how many cycles passed without the pressure of too many evictions
-  u32 cycles_since_bad_event_ = 0;
+  u32 stable_cycles_ = 0;
   void adapt_rebalance_interval();
   // AIMD constants
-  static constexpr u32 MIN_INTERVAL_MS = 20;  // most aggressive
-  static constexpr u32 MAX_INTERVAL_MS = 500; // most relaxed
+  static constexpr u32 MIN_INTERVAL_MS = 20;   // most aggressive
+  static constexpr u32 MAX_INTERVAL_MS = 1000; // most relaxed
   static constexpr u32 ADDITIVE_INCREASE_MS = 10;
   static constexpr float MULTIPLICATIVE_DECREASE_FACTOR = 0.5;
   // react if >n sync evictions happen in one cycle
