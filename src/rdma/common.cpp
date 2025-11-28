@@ -36,7 +36,6 @@ struct ibv_mr *rdma_buffer_alloc(struct ibv_pd *pd, usize alignment, usize size,
     ERROR("Failed to allocate buffer, -ENOMEM");
     return NULL;
   }
-  debug("Buffer allocated: %p, len: %u\n", buf, size);
   mr = rdma_buffer_register(pd, buf, (u32)size, permission);
   if (!mr) {
     free(buf);
@@ -51,7 +50,6 @@ void rdma_buffer_free(struct ibv_mr *mr) {
   }
   void *to_free = mr->addr;
   rdma_buffer_deregister(mr);
-  debug("Buffer %p free'ed\n", to_free);
   free(to_free);
 }
 
@@ -69,8 +67,6 @@ struct ibv_mr *rdma_buffer_register(struct ibv_pd *pd, void *addr,
           strerror(errno));
     return NULL;
   }
-  debug("Registered: %p, len: %u, stag: 0x%x\n", mr->addr,
-        (unsigned int)mr->length, mr->lkey);
   return mr;
 }
 
@@ -79,8 +75,6 @@ void rdma_buffer_deregister(struct ibv_mr *mr) {
     ERROR("Passed memory region is NULL, ignoring");
     return;
   }
-  debug("Deregistered: %p, len: %u , stag : 0x%x \n", mr->addr,
-        (unsigned int)mr->length, mr->lkey);
   ibv_dereg_mr(mr);
 }
 
@@ -109,8 +103,6 @@ int process_rdma_cm_event(struct rdma_event_channel *echannel,
     rdma_ack_cm_event(*cm_event);
     return -1; // unexpected event
   }
-  debug("A new %s type event is received\n",
-        rdma_event_str((*cm_event)->event));
   /* The caller must acknowledge the event */
   return ret;
 }

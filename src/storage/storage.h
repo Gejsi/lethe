@@ -1,6 +1,8 @@
 #pragma once
 
-#include "utils.h"
+#define USE_ASYNC_LOGGER
+
+#include "types.h"
 
 // Interface for a generic block-based storage backend.
 class Storage {

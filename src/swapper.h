@@ -18,7 +18,7 @@ constexpr usize SWAP_SIZE = 256 * MB;
 constexpr usize HEAP_SIZE = CACHE_SIZE + SWAP_SIZE;
 constexpr uptr HEAP_START = 0xffff800000000000;
 constexpr usize NUM_HEAP_PAGES = HEAP_SIZE / PAGE_SIZE;
-constexpr usize NUM_SHARDS = 16;
+constexpr usize NUM_SHARDS = 256;
 constexpr usize REAP_RESERVE = (usize)(NUM_PAGES * 0.2);
 constexpr usize SHARD_REAP_RESERVE = REAP_RESERVE / NUM_SHARDS;
 
@@ -73,7 +73,6 @@ struct alignas(64) Shard {
   // Lists used to organize the pages with a LRU policy
   std::list<Page *> active_pages;
   std::list<Page *> inactive_pages;
-  // std::list<Page *> free_pages;
 
   // save the oldest page (back of inactive list).
   // 0 = Empty, UINT64_MAX = Newest.
@@ -107,7 +106,9 @@ public:
   void handle_fault(void *fault_addr, regstate_t *regstate);
 
   // Starts the background thread for LRU rebalancing
-  void launch_background_rebalancing();
+  void start_background_rebalancing();
+  // Stops the background thread for LRU rebalancing
+  void stop_background_rebalancing();
 
   // Demotion: hot -> cold
   void demote_cold_pages(Shard &shard);
@@ -134,42 +135,7 @@ private:
   // Returns the index of the shard where a page is handled
   usize get_shard_idx(uptr vaddr);
 
-  /**
-   * @brief Acquires a free physical page slot to service a page fault.
-   *
-   * This method is the core of the page replacement policy. It attempts to
-   * find a free page using a tiered strategy:
-   *
-   * 1.  **Check `free_list_`:** The fastest path. If a pre-reaped page is
-   *     available, it is returned immediately.
-   *
-   * 2.  **Evict from `inactive_list_`:** If no free pages are available, it
-   *     selects a victim from the `inactive_list_`. This list holds pages
-   *     that have not been accessed recently. The victim is chosen from the
-   *     BACK of the list, which represents the page that has been "cold" for
-   *     the longest time (a FIFO policy for cold pages).
-   *
-   * 3.  **Evict from `active_list_`:** In high-pressure scenarios where the
-   *     `inactive_list_` is also empty, it is forced to steal a page from
-   *     the `active_list_`. It chooses the page at the BACK, which is the
-   *     Least Recently Used "hot" page.
-   *
-   * After a victim is chosen, it is swapped out (if dirty) and its physical
-   * slot is returned for reuse.
-   *
-   *    [ New/Hot Pages ]           [ Recently Cold ]         [ Oldest/Coldest ]
-   *          |                             |                         |
-   *          v                             v                         v
-   *  FRONT <--- [ P3, P2, P1 ] <--- BACK   FRONT <--- [ P9, P8, P7 ] <--- BACK
-   *         active_list_                          inactive_list_
-   *          |       ^                           |         ^
-   *          |       |                           |         |
-   *          +-------+                           +---------+
-   *        Stay if                              Evicted if no
-   *        accessed again                      free pages exist
-   *
-   * @note This function assumes the caller holds the pages_mutex_.
-   */
+  // Acquires a free physical page slot to service a page fault.
   Page *acquire_page(Shard &shard);
 
   std::unique_ptr<Storage> storage_; // The abstract storage backend
@@ -186,6 +152,8 @@ private:
   // Track the state of all pages, both on the cache and on the swap area
   std::unique_ptr<std::atomic<PageState>[]> page_states_;
 
+  std::thread rebalancer_;
+  std::atomic<bool> rebalancer_running_{true};
   // how often the rebalance thread runs, recomputed at runtime
   u32 rebalance_interval_ms_ = 200;
   // shared between fault handler and the rebalance thread

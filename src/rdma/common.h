@@ -12,17 +12,7 @@
 #include <infiniband/verbs.h>
 #include <rdma/rdma_cma.h>
 
-#include "utils.h"
-
-#ifdef ACN_RDMA_DEBUG
-/* Debug Macro */
-#define debug(msg, ...)                                                        \
-  do {                                                                         \
-    printf("DEBUG: " msg, ##__VA_ARGS__);                                      \
-  } while (0)
-#else
-#define debug(...)
-#endif /* ACN_RDMA_DEBUG */
+#include "types.h"
 
 /*
  * MAX work requests (WR).

@@ -30,7 +30,7 @@ private:
   int perform_rdma_op(void *local_addr, u64 remote_offset,
                       ibv_wr_opcode opcode);
 
-  // Non-owning pointers to the RDMA resources created in client.cpp
+  // Non-owning pointers to the RDMA resources
   struct ibv_qp *qp_;
   struct ibv_comp_channel *comp_channel_;
   struct ibv_mr *local_cache_mr_;

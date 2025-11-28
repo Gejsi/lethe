@@ -7,7 +7,6 @@
 
 #include "common_client.h"
 #include "storage/rdma_storage.h"
-#include "utils.h"
 
 typedef int (*__libc_start_main_t)(int (*main)(int, char **, char **), int argc,
                                    char **argv,

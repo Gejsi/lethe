@@ -83,6 +83,7 @@ target_link_libraries(common INTERFACE pthread ${VOLIMEM_LIBRARY})
 set(COMMON_SOURCES
   ${SRC}/utils.cpp
   ${SRC}/swapper.cpp
+  ${SRC}/logger.cpp
 )
 
 # Playground

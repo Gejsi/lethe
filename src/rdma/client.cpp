@@ -10,6 +10,7 @@
 #include "benchmark/std_map.h"
 #include "common_client.h"
 #include "storage/rdma_storage.h"
+#include "swapper.h"
 
 void usage() {
   printf("Usage:\n");
@@ -38,13 +39,17 @@ void virtual_main(void *any) {
 
   const char *rebalancer_env = std::getenv("REBALANCE");
   if (rebalancer_env && std::string(rebalancer_env) == "1") {
-    g_swapper->launch_background_rebalancing();
+    g_swapper->start_background_rebalancing();
   }
 
   BumpMapDataLayer data_layer;
   run_benchmark(bench_config, &data_layer);
 
   g_swapper->print_stats();
+
+  if (rebalancer_env && std::string(rebalancer_env) == "1") {
+    g_swapper->stop_background_rebalancing();
+  }
 
   DEBUG("--- Exiting VM ---");
 }
@@ -143,6 +148,8 @@ int main(int argc, char **argv) {
                                                       IBV_ACCESS_REMOTE_WRITE));
   if (!cache_area) {
     PANIC("Failed to allocate and register the cache");
+  } else {
+    INFO("Cache area allocated at %p", (void *)cache_area);
   }
 
   {

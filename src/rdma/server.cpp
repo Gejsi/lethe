@@ -4,7 +4,6 @@
 
 #include "common.h"
 #include "swapper.h"
-#include "utils.h"
 
 /* Resources needed to setup an RDMA connection */
 /* Event channel, where connection management (cm) related events are relayed */

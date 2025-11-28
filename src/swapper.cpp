@@ -1,11 +1,13 @@
+#define USE_ASYNC_LOGGER
+
 #include <algorithm>
 #include <cstdio>
 #include <mutex>
 #include <random>
 #include <volimem/mapper.h>
 
+#include "logger.h"
 #include "swapper.h"
-#include "utils.h"
 
 void set_permissions(uptr vaddr, u64 flags) {
   mapper_t::mpermit(vaddr, PAGE_SIZE, flags);
@@ -53,13 +55,15 @@ Swapper::Swapper(std::unique_ptr<Storage> storage)
     page_states_[i].store(PageState::Unmapped, std::memory_order_relaxed);
   }
 
-  INFO("Swapper initialized with %zu cache pages.", NUM_PAGES);
+  INFO("Swapper initialized with %zu cache slots", NUM_PAGES);
+
+  AsyncLogger::instance().init("swapper.log");
 }
 
-Swapper::~Swapper() { DEBUG("Destructing Swapper"); }
+Swapper::~Swapper() { DEBUG("Destroyed Swapper"); }
 
-void Swapper::launch_background_rebalancing() {
-  std::thread rebalance_thread = std::thread([this]() {
+void Swapper::start_background_rebalancing() {
+  rebalancer_ = std::thread([this]() {
     std::vector<size_t> shard_indices(NUM_SHARDS);
     for (size_t i = 0; i < NUM_SHARDS; ++i)
       shard_indices[i] = i;
@@ -67,25 +71,29 @@ void Swapper::launch_background_rebalancing() {
     std::random_device rd;
     std::default_random_engine rng(rd());
 
-    while (true) {
+    while (rebalancer_running_.load()) {
       sleep_ms(rebalance_interval_ms_);
 
-      // Shuffle the order of shards to visit
+      // Shuffle the order of shards to rebalance
       std::shuffle(shard_indices.begin(), shard_indices.end(), rng);
 
       for (usize shard_idx : shard_indices) {
+        if (!rebalancer_running_.load()) {
+          return;
+        }
 
         Shard &shard = shards_[shard_idx];
 
-        if (shard.mutex.try_lock()) {
-          // Rebalance lists
-          demote_cold_pages(shard);
-          promote_hot_pages(shard);
-          reap_cold_pages(shard);
-
-          shard.mutex.unlock();
-        } else {
-          stats_.rebalancer_skips++;
+        {
+          std::unique_lock<std::mutex> lock(shard.mutex, std::try_to_lock);
+          if (lock.owns_lock()) {
+            // Rebalance lists
+            demote_cold_pages(shard);
+            promote_hot_pages(shard);
+            reap_cold_pages(shard);
+          } else {
+            stats_.rebalancer_skips++;
+          }
         }
       }
 
@@ -93,8 +101,14 @@ void Swapper::launch_background_rebalancing() {
       adapt_rebalance_interval();
     }
   });
+}
 
-  rebalance_thread.detach();
+void Swapper::stop_background_rebalancing() {
+  rebalancer_running_ = false;
+
+  if (rebalancer_.joinable()) {
+    rebalancer_.join();
+  }
 }
 
 void Swapper::print_state() {
@@ -255,8 +269,6 @@ Page *Swapper::acquire_page(Shard &shard) {
     return victim_page;
   }
 
-  // {
-  //   std::lock_guard<std::mutex> lock(shard.mutex);
   // no free page found, eviction is necessary
   if (!shard.inactive_pages.empty()) {
     victim_page = shard.inactive_pages.back();
@@ -274,13 +286,11 @@ Page *Swapper::acquire_page(Shard &shard) {
 
   // evict chosen page
   swap_out_page(victim_page);
-  // }
 
   // increase count of evictions to possibly
   // adapt the frequency of the rebalancing
   evictions_in_cycle_++;
 
-  // increase related statistic counter
   stats_.reactive_evictions++;
 
   return victim_page;
@@ -339,7 +349,12 @@ void Swapper::swap_out_page(Page *page) {
   INFO("Swapping OUT: 0x%lx. Cache (gva->gpa): 0x%lx->0x%lx", victim_vaddr,
        cache_gva, mapper_t::gva_to_gpa((void *)cache_gva));
 
-  storage_->write_page((void *)cache_gva, victim_offset);
+  int ret = storage_->write_page((void *)cache_gva, victim_offset);
+  if (ret != 0) {
+    ERROR("Failed to swap out: Backend write failed (%d)", ret);
+    // NOTE: Robust error handling would be needed here.
+    return;
+  }
   page_states_[get_heap_idx(victim_vaddr)] = PageState::RemotelyMapped;
 
   stats_.swap_outs++;
@@ -383,7 +398,6 @@ void Swapper::handle_fault(void *fault_addr, regstate_t *regstate) {
   {
     std::lock_guard<std::mutex> lock(shard.mutex);
     Page *page = acquire_page(shard);
-
     swap_in_page(page, aligned_fault_vaddr);
     shard.active_pages.push_front(page);
   }
@@ -400,9 +414,8 @@ void Swapper::demote_cold_pages(Shard &shard) {
       // page is still hot, clear the A-bit and keep it in the active list
       clear_permissions(hot_page->vaddr, PTE_A);
       // move page to front
-      // shard.active_pages.splice(shard.active_pages.begin(),
-      // shard.active_pages,
-      //                           std::next(it).base());
+      shard.active_pages.splice(shard.active_pages.begin(), shard.active_pages,
+                                std::next(it).base());
 
       ++it;
     } else {
@@ -428,8 +441,6 @@ void Swapper::promote_hot_pages(Shard &shard) {
       // page has become hot, promote to active
       shard.active_pages.push_front(cold_page);
       it = shard.inactive_pages.erase(it);
-      // it = std::list<Page *>::reverse_iterator(
-      //     shard.inactive_pages.erase(std::next(it).base()));
       clear_permissions(cold_page->vaddr, PTE_A);
 
       stats_.promotions++;
@@ -453,14 +464,10 @@ void Swapper::reap_cold_pages(Shard &shard) {
     shard.inactive_pages.pop_back();
 
     swap_out_page(victim_page);
-
-    // shard.mutex.unlock();
-
     free_pages_queue_.enqueue(victim_page);
+
     evictions++;
     stats_.proactive_evictions++;
-
-    // shard.mutex.lock();
   }
 }
 

@@ -1,8 +1,8 @@
 #pragma once
 
 #include <chrono>
-#include <cstddef>
-#include <cstdint>
+
+#include "types.h"
 
 #define UNUSED(x) (void)(x)
 
@@ -13,6 +13,20 @@
 #define CLR_WARN "\033[33m"
 #define CLR_ERROR "\033[31m"
 #define CLR_PANIC "\033[1;31m" // bright red
+
+#ifdef USE_ASYNC_LOGGER
+#include "logger.h"
+#define LOG_IMPL(color, level, fmt, ...)                                       \
+  AsyncLogger::instance().log(level, fmt, ##__VA_ARGS__)
+#else
+#define LOG_IMPL(color, level, fmt, ...)                                       \
+  printf(color "[%s] " fmt CLR_RESET "\n", level, ##__VA_ARGS__)
+#endif
+
+#define DEBUG(fmt, ...) LOG_IMPL(CLR_DEBUG, "DEBUG", fmt, ##__VA_ARGS__)
+#define INFO(fmt, ...) LOG_IMPL(CLR_INFO, "INFO", fmt, ##__VA_ARGS__)
+#define WARN(fmt, ...) LOG_IMPL(CLR_WARN, "WARN", fmt, ##__VA_ARGS__)
+#define ERROR(fmt, ...) LOG_IMPL(CLR_ERROR, "ERROR", fmt, ##__VA_ARGS__)
 
 /*
 #define DEBUG(fmt, ...)                                                        \
@@ -25,10 +39,12 @@
   printf(CLR_ERROR "[ERROR] " fmt CLR_RESET "\n", ##__VA_ARGS__)
 */
 
+/*
 #define DEBUG(fmt, ...) ((void)0)
 #define INFO(fmt, ...) ((void)0)
 #define WARN(fmt, ...) ((void)0)
 #define ERROR(fmt, ...) ((void)0)
+*/
 
 #define PANIC(fmt, ...)                                                        \
   do {                                                                         \
@@ -68,18 +84,6 @@
   } else {                                                                     \
     printf(CLR_INFO "[PASS] Assertion: %s" CLR_RESET "\n", msg);               \
   }
-
-using u8 = uint8_t;
-using u16 = uint16_t;
-using u32 = uint32_t;
-using u64 = uint64_t;
-using uptr = uintptr_t;
-using usize = size_t;
-
-using i8 = int8_t;
-using i16 = int16_t;
-using i32 = int32_t;
-using i64 = int64_t;
 
 constexpr usize KB = 1024;
 constexpr usize MB = KB * KB;
