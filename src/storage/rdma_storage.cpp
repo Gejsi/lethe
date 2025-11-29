@@ -1,3 +1,4 @@
+#define USE_ASYNC_LOGGER
 #include "rdma_storage.h"
 #include "swapper.h"
 

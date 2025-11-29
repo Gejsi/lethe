@@ -1,7 +1,5 @@
 #pragma once
 
-#define USE_ASYNC_LOGGER
-
 #include "types.h"
 
 // Interface for a generic block-based storage backend.

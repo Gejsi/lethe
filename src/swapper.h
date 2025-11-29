@@ -70,7 +70,7 @@ struct Page {
 struct alignas(64) Shard {
   std::mutex mutex;
 
-  // Lists used to organize the pages with a LRU policy
+  // Lists used to organize the pages mapped in the cache with a LRU policy
   std::list<Page *> active_pages;
   std::list<Page *> inactive_pages;
 
@@ -143,7 +143,7 @@ private:
   // Fixed-size array describing where a faulting address
   // is located in the physical cache
   std::unique_ptr<Page[]> pages_;
-  // List of unmapped pages in the cache
+  // Unmapped pages in the cache
   // TODO: implement my own simpler lock-free queue
   moodycamel::ConcurrentQueue<Page *> free_pages_queue_;
 
