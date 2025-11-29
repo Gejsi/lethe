@@ -82,8 +82,6 @@ using Clock = std::chrono::steady_clock;
 using TimePoint = Clock::time_point;
 using Milliseconds = std::chrono::milliseconds;
 
-constexpr const char *bool_to_str(bool b) noexcept {
-  return b ? "true" : "false";
-}
+constexpr const char *bool_to_str(bool b) noexcept;
 
 void sleep_ms(usize ms);

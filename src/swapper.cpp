@@ -8,6 +8,11 @@
 #define USE_ASYNC_LOGGER
 #include "swapper.h"
 
+constexpr bool pte_is_present(u64 pte) { return pte & PTE_P; }
+constexpr bool pte_is_writable(u64 pte) { return pte & PTE_W; }
+constexpr bool pte_is_accessed(u64 pte) { return pte & PTE_A; }
+constexpr bool pte_is_dirty(u64 pte) { return pte & PTE_D; }
+
 void set_permissions(uptr vaddr, u64 flags) {
   mapper_t::mpermit(vaddr, PAGE_SIZE, flags);
   mapper_t::flush(vaddr, PAGE_SIZE);
@@ -18,11 +23,6 @@ void clear_permissions(uptr vaddr, u64 flags) {
   mapper_t::mpermit(vaddr, PAGE_SIZE, perms & ~flags);
   mapper_t::flush(vaddr, PAGE_SIZE);
 }
-
-constexpr bool pte_is_present(u64 pte) { return pte & PTE_P; }
-constexpr bool pte_is_writable(u64 pte) { return pte & PTE_W; }
-constexpr bool pte_is_accessed(u64 pte) { return pte & PTE_A; }
-constexpr bool pte_is_dirty(u64 pte) { return pte & PTE_D; }
 
 void map_gva(uptr gva, uptr gpa) {
   mapper_t::map_gpt(gva, gpa, PAGE_SIZE, PTE_P | PTE_W);
@@ -315,9 +315,8 @@ void Swapper::swap_in_page(Page *page, uptr aligned_fault_vaddr) {
     auto target_offset = aligned_fault_vaddr - HEAP_START;
     int ret = storage_->read_page((void *)cache_gva, target_offset);
     if (ret != 0) {
-      ERROR("Failed to swap in: Backend read failed (%d)", ret);
-      // NOTE: Robust error handling would be needed here.
-      return;
+      // NOTE: Add more context to this panic dumping
+      PANIC("Failed to swap in: backend read failed (%d)", ret);
     }
 
     stats_.swap_ins++;
@@ -351,16 +350,15 @@ void Swapper::swap_out_page(Page *page) {
 
   int ret = storage_->write_page((void *)cache_gva, victim_offset);
   if (ret != 0) {
-    ERROR("Failed to swap out: Backend write failed (%d)", ret);
-    // NOTE: Robust error handling would be needed here.
-    return;
+    // NOTE: Add more context to this panic dumping
+    PANIC("Failed to swap out: backend write failed (%d)", ret);
   }
   page_states_[get_heap_idx(victim_vaddr)] = PageState::RemotelyMapped;
 
   stats_.swap_outs++;
   /*
   } else {
-    INFO("Page %zu (GVA 0x%lx) is CLEAN. Skipping write-back.",
+    INFO("Page %zu (GVA 0x%lx) is clean. Skipping write-back.",
          (size_t)(page - pages_.get()), victim_vaddr);
 
     heap_state_map_[victim_vaddr] = PageState::Unmapped;

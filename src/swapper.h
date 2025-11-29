@@ -22,12 +22,13 @@ constexpr usize NUM_SHARDS = 256;
 constexpr usize REAP_RESERVE = (usize)(NUM_PAGES * 0.2);
 constexpr usize SHARD_REAP_RESERVE = REAP_RESERVE / NUM_SHARDS;
 
-void set_permissions(uptr vaddr, u64 flags);
-void clear_permissions(uptr vaddr, u64 flags);
 constexpr bool pte_is_present(u64 pte);
 constexpr bool pte_is_writable(u64 pte);
 constexpr bool pte_is_accessed(u64 pte);
 constexpr bool pte_is_dirty(u64 pte);
+
+void set_permissions(uptr vaddr, u64 flags);
+void clear_permissions(uptr vaddr, u64 flags);
 // Map a virtual page to a physical page
 void map_gva(uptr gva, uptr gpa);
 // Unmap a page from the guest page table
@@ -155,15 +156,15 @@ private:
   std::thread rebalancer_;
   std::atomic<bool> rebalancer_running_{true};
   // how often the rebalance thread runs, recomputed at runtime
-  u32 rebalance_interval_ms_ = 200;
+  u32 rebalance_interval_ms_ = (MAX_INTERVAL_MS + MIN_INTERVAL_MS) / 2;
   // shared between fault handler and the rebalance thread
   std::atomic<u32> evictions_in_cycle_ = 0;
   // how many cycles passed without the pressure of too many evictions
   u32 stable_cycles_ = 0;
   void adapt_rebalance_interval();
   // AIMD constants
-  static constexpr u32 MIN_INTERVAL_MS = 20;   // most aggressive
-  static constexpr u32 MAX_INTERVAL_MS = 1000; // most relaxed
+  static constexpr u32 MIN_INTERVAL_MS = 10;  // most aggressive
+  static constexpr u32 MAX_INTERVAL_MS = 200; // most relaxed
   static constexpr u32 ADDITIVE_INCREASE_MS = 10;
   static constexpr float MULTIPLICATIVE_DECREASE_FACTOR = 0.5;
   // react if >n sync evictions happen in one cycle
