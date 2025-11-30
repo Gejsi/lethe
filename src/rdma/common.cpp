@@ -36,8 +36,9 @@ struct ibv_mr *rdma_buffer_alloc(struct ibv_pd *pd, usize alignment, usize size,
     ERROR("Failed to allocate buffer, -ENOMEM");
     return NULL;
   }
-  mr = rdma_buffer_register(pd, buf, (u32)size, permission);
+  mr = rdma_buffer_register(pd, buf, size, permission);
   if (!mr) {
+    ERROR("Failed to register the RDMA buffer");
     free(buf);
   }
   return mr;
@@ -53,8 +54,7 @@ void rdma_buffer_free(struct ibv_mr *mr) {
   free(to_free);
 }
 
-struct ibv_mr *rdma_buffer_register(struct ibv_pd *pd, void *addr,
-                                    uint32_t length,
+struct ibv_mr *rdma_buffer_register(struct ibv_pd *pd, void *addr, usize length,
                                     enum ibv_access_flags permission) {
   struct ibv_mr *mr = NULL;
   if (!pd) {

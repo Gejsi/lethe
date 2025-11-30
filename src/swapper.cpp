@@ -47,7 +47,6 @@ Swapper::Swapper(std::unique_ptr<Storage> storage)
 
   for (size_t i = 0; i < NUM_PAGES; i++) {
     free_pages_queue_.enqueue(&pages_[i]);
-    // free_pages_queue_.push_back(&pages_[i]);
   }
 
   for (size_t i = 0; i < NUM_HEAP_PAGES; ++i) {
@@ -257,12 +256,6 @@ usize Swapper::get_shard_idx(uptr vaddr) {
 
 Page *Swapper::acquire_page(Shard &shard) {
   Page *victim_page = nullptr;
-
-  // if (!free_pages_queue_.empty()) {
-  //   victim_page = free_pages_queue_.front();
-  //   free_pages_queue_.pop_front();
-  //   return victim_page;
-  // }
 
   if (free_pages_queue_.try_dequeue(victim_page)) {
     return victim_page;

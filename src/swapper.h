@@ -18,7 +18,7 @@ constexpr usize SWAP_SIZE = 256 * MB;
 constexpr usize HEAP_SIZE = CACHE_SIZE + SWAP_SIZE;
 constexpr uptr HEAP_START = 0xffff800000000000;
 constexpr usize NUM_HEAP_PAGES = HEAP_SIZE / PAGE_SIZE;
-constexpr usize NUM_SHARDS = 256;
+constexpr usize NUM_SHARDS = 64;
 constexpr usize REAP_RESERVE = (usize)(NUM_PAGES * 0.2);
 constexpr usize SHARD_REAP_RESERVE = REAP_RESERVE / NUM_SHARDS;
 

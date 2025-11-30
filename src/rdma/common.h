@@ -110,8 +110,7 @@ void rdma_buffer_free(struct ibv_mr *mr);
  * @permission: OR of IBV_ACCESS_* permissions as defined for the enum
  * ibv_access_flags
  */
-struct ibv_mr *rdma_buffer_register(struct ibv_pd *pd, void *addr,
-                                    uint32_t length,
+struct ibv_mr *rdma_buffer_register(struct ibv_pd *pd, void *addr, usize length,
                                     enum ibv_access_flags permission);
 
 /* Deregisters a previously register memory
