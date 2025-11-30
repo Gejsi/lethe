@@ -1,4 +1,3 @@
-
 #include <algorithm>
 #include <cstdio>
 #include <mutex>
@@ -78,22 +77,21 @@ void Swapper::start_background_rebalancing() {
       std::shuffle(shard_indices.begin(), shard_indices.end(), rng);
 
       for (usize shard_idx : shard_indices) {
-        if (!rebalancer_running_.load()) {
-          return;
-        }
-
         Shard &shard = shards_[shard_idx];
 
-        {
-          std::unique_lock<std::mutex> lock(shard.mutex, std::try_to_lock);
-          if (lock.owns_lock()) {
-            // Rebalance lists
-            demote_cold_pages(shard);
-            promote_hot_pages(shard);
-            reap_cold_pages(shard);
-          } else {
-            stats_.rebalancer_skips++;
-          }
+        std::unique_lock<std::mutex> lock(shard.mutex, std::try_to_lock);
+
+        if (lock.owns_lock()) {
+          // Rebalance lists
+          demote_cold_pages(shard);
+          promote_hot_pages(shard);
+          reap_cold_pages(shard);
+        } else {
+          stats_.rebalancer_skips++;
+        }
+
+        if (!rebalancer_running_.load()) {
+          return;
         }
       }
 
@@ -151,13 +149,14 @@ void Swapper::print_stats() {
   usize total_faults = stats_.total_faults.load();
   usize swap_ins = stats_.swap_ins.load();
   usize swap_outs = stats_.swap_outs.load();
-  usize clean_evictions = stats_.clean_evictions.load();
+  usize skipped_writes = stats_.skipped_writes.load();
+  usize discards = stats_.discards.load();
   usize reactive_evictions = stats_.reactive_evictions.load();
   usize proactive_evictions = stats_.proactive_evictions.load();
   usize promotions = stats_.promotions.load();
 
   // total evictions, categorized by content (dirty/clean)
-  usize total_evictions_by_content = swap_outs + clean_evictions;
+  usize total_evictions_by_content = swap_outs + skipped_writes + discards;
   // total evictions, categorized by trigger (proactive/reactive)
   usize total_evictions_by_trigger = proactive_evictions + reactive_evictions;
   ENSURE(total_evictions_by_content == total_evictions_by_trigger,
@@ -223,20 +222,20 @@ void Swapper::print_stats() {
          static_cast<double>(promotions + total_evictions_by_content));
 
   printf("\nCOUNTERS:\n");
-  printf("  - Total Page Faults:   %zu\n", total_faults);
-  printf("    - Demand Zeros:    %zu\n", stats_.demand_zeros.load());
-  printf("    - Swap-Ins:        %zu\n", swap_ins);
-  printf("  - Total Evictions:     %zu\n", total_evictions_by_content);
-  printf("    - Swap-Outs (Dirty): %zu\n", swap_outs);
-  printf("    - Discards (Clean):  %zu\n", clean_evictions);
+  printf("  - Total Page Faults:    %zu\n", total_faults);
+  printf("    - Demand Zeros:       %zu\n", stats_.demand_zeros.load());
+  printf("    - Swap-Ins:           %zu\n", swap_ins);
+  printf("  - Total Evictions:      %zu\n", total_evictions_by_content);
+  printf("    - Swap-Outs:          %zu\n", swap_outs);
+  printf("    - Skipped writes:     %zu\n", skipped_writes);
+  printf("    - Discards:           %zu\n", discards);
   printf("  - Eviction Triggers:\n");
   printf("    - Proactive (Reaper): %zu\n", proactive_evictions);
   printf("    - Reactive (Stall):   %zu\n", reactive_evictions);
   printf("  - LRU List Activity:\n");
-  printf("    - Promotions:       %zu\n", promotions);
-  printf("    - Demotions:        %zu\n", stats_.demotions.load());
-  printf("    - Rebalancer skips:        %zu\n",
-         stats_.rebalancer_skips.load());
+  printf("    - Promotions:         %zu\n", promotions);
+  printf("    - Demotions:          %zu\n", stats_.demotions.load());
+  printf("    - Rebalancer skips:   %zu\n", stats_.rebalancer_skips.load());
   printf("=================================================================\n");
 }
 
@@ -306,18 +305,21 @@ void Swapper::swap_in_page(Page *page, uptr aligned_fault_vaddr) {
   if (page_state == PageState::Unmapped) {
     DEBUG("Assigning page for gva 0x%lx", aligned_fault_vaddr);
     memset((void *)cache_gva, 0, PAGE_SIZE);
+    page_states_[heap_idx] = PageState::FreshlyMapped;
+
     stats_.demand_zeros++;
   } else if (page_state == PageState::RemotelyMapped) {
-    INFO("Swapping IN: 0x%lx into cache slot %zu. Cache (gva->gpa): "
-         "0x%lx->0x%lx",
-         aligned_fault_vaddr, get_page_idx(page), cache_gva, cache_gpa);
+    DEBUG("Swapping IN: 0x%lx into cache slot %zu. Cache (gva->gpa): "
+          "0x%lx->0x%lx",
+          aligned_fault_vaddr, get_page_idx(page), cache_gva, cache_gpa);
 
     auto target_offset = aligned_fault_vaddr - HEAP_START;
     int ret = storage_->read_page((void *)cache_gva, target_offset);
     if (ret != 0) {
-      // NOTE: Add more context to this panic dumping
       PANIC("Failed to swap in: backend read failed (%d)", ret);
     }
+
+    page_states_[heap_idx] = PageState::Mapped;
 
     stats_.swap_ins++;
   } else {
@@ -326,7 +328,6 @@ void Swapper::swap_in_page(Page *page, uptr aligned_fault_vaddr) {
         page_state_to_str(page_state), aligned_fault_vaddr);
   }
 
-  page_states_[heap_idx] = PageState::Mapped;
   map_gva(aligned_fault_vaddr, cache_gpa);
   page->vaddr = aligned_fault_vaddr;
 }
@@ -334,38 +335,54 @@ void Swapper::swap_in_page(Page *page, uptr aligned_fault_vaddr) {
 void Swapper::swap_out_page(Page *page) {
   // victim page is the n-th page within the heap
   uptr victim_vaddr = page->vaddr;
+  usize heap_idx = get_heap_idx(victim_vaddr);
+  PageState page_state = page_states_[heap_idx].load();
 
-  // TODO: Remove this line. This is mostly used for debugging,
-  // as it catches unexpected race conditions that cause a
-  // mapped page to be selected for a swap-in
-  clear_permissions(victim_vaddr, PTE_P | PTE_W);
+  // revoke permissions except the dirty bit:
+  // this enables an optimization where clean pages
+  // can be unmapped without any backend write-back
+  clear_permissions(victim_vaddr, PTE_P | PTE_W | PTE_A);
 
-  // FIX: the dirty-bit check needs to be implemented appropriately
-  // if (auto perms = mapper_t::get_protect(victim_vaddr); pte_is_dirty(perms))
-  // {
-  auto victim_offset = victim_vaddr - HEAP_START;
-  auto cache_gva = get_cache_gva(page);
-  INFO("Swapping OUT: 0x%lx. Cache (gva->gpa): 0x%lx->0x%lx", victim_vaddr,
-       cache_gva, mapper_t::gva_to_gpa((void *)cache_gva));
+  auto perms = mapper_t::get_protect(victim_vaddr);
+  DEBUG("Evicted %s (is dirty: %s)", page_state_to_str(page_state),
+        pte_is_dirty(perms) ? "true" : "false");
 
-  int ret = storage_->write_page((void *)cache_gva, victim_offset);
-  if (ret != 0) {
-    // NOTE: Add more context to this panic dumping
-    PANIC("Failed to swap out: backend write failed (%d)", ret);
-  }
-  page_states_[get_heap_idx(victim_vaddr)] = PageState::RemotelyMapped;
+  if (pte_is_dirty(perms)) {
+    // dirty page: write to storage
+    auto victim_offset = victim_vaddr - HEAP_START;
+    auto cache_gva = get_cache_gva(page);
+    DEBUG("Swapping OUT: 0x%lx. Cache (gva->gpa): 0x%lx->0x%lx", victim_vaddr,
+          cache_gva, mapper_t::gva_to_gpa((void *)cache_gva));
 
-  stats_.swap_outs++;
-  /*
+    int ret = storage_->write_page((void *)cache_gva, victim_offset);
+    if (ret != 0) {
+      PANIC("Failed to swap out: backend write failed (%d)", ret);
+    }
+
+    page_states_[heap_idx] = PageState::RemotelyMapped;
+
+    stats_.swap_outs++;
+  } else if (page_state == PageState::Mapped) {
+    // clean page whose data is backed on the storage
+    DEBUG("Evicting clean storage-backed page 0x%lx from cache slot %zu",
+          victim_vaddr, get_page_idx(page));
+
+    page_states_[heap_idx] = PageState::RemotelyMapped;
+
+    stats_.skipped_writes++;
+  } else if (page_state == PageState::FreshlyMapped) {
+    // clean page that was never written: it can be discarded
+    DEBUG("Evicting fresh page 0x%lx from cache slot %zu", victim_vaddr,
+          get_page_idx(page));
+
+    page_states_[heap_idx] = PageState::Unmapped;
+
+    stats_.discards++;
   } else {
-    INFO("Page %zu (GVA 0x%lx) is clean. Skipping write-back.",
-         (size_t)(page - pages_.get()), victim_vaddr);
-
-    heap_state_map_[victim_vaddr] = PageState::Unmapped;
-    // heap_state_map_.erase(victim_vaddr);
-    stats_.clean_evictions++;
+    UNREACHABLE(
+        "A %s page (0x%lx) shouldn't cause a fault that needs a swap-out",
+        page_state_to_str(page_state), victim_vaddr);
   }
-  */
 
   unmap_gva(victim_vaddr);
   page->reset();
@@ -383,9 +400,8 @@ void Swapper::handle_fault(void *fault_addr, regstate_t *regstate) {
   // faulting address should be within the heap
   if (aligned_fault_vaddr < HEAP_START ||
       aligned_fault_vaddr >= HEAP_START + HEAP_SIZE) {
-    ERROR("Fault address 0x%lx outside of heap range [0x%lx, 0x%lx)",
+    PANIC("Fault address 0x%lx outside of heap range [0x%lx, 0x%lx)",
           aligned_fault_vaddr, HEAP_START, HEAP_START + HEAP_SIZE);
-    return;
   }
 
   stats_.total_faults++;
@@ -457,7 +473,7 @@ void Swapper::reap_cold_pages(Shard &shard) {
   usize evictions = 0;
 
   // try to keep some amount of free space in the shard
-  while (evictions < SHARD_REAP_RESERVE && !shard.inactive_pages.empty()) {
+  while (!shard.inactive_pages.empty() && evictions < SHARD_REAP_RESERVE) {
     Page *victim_page = shard.inactive_pages.back();
     shard.inactive_pages.pop_back();
 

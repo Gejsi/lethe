@@ -34,12 +34,30 @@ void map_gva(uptr gva, uptr gpa);
 // Unmap a page from the guest page table
 void unmap_gva(uptr gva);
 
-enum class PageState : u8 { Unmapped, Mapped, RemotelyMapped };
+enum class PageState : u8 {
+  // Cache slot is empty: access triggers a demand-zero allocation
+  Unmapped,
+
+  // Page is in cache but has NO copy on the storage:
+  // basically, a newly allocated demand-zero page.
+  // If evicted while clean, it can be fully discared
+  FreshlyMapped,
+
+  // Page is in cache and HAS a valid copy on the storage:
+  // basically, a page retrieved from the swap area.
+  // If evicted while clean, the write-back can be skipped
+  Mapped,
+
+  // Page is in storage: access triggers a swap-in to bring it in cache
+  RemotelyMapped
+};
 
 constexpr const char *page_state_to_str(PageState state) {
   switch (state) {
   case PageState::Unmapped:
     return "Unmapped";
+  case PageState::FreshlyMapped:
+    return "FreshlyMapped";
   case PageState::Mapped:
     return "Mapped";
   case PageState::RemotelyMapped:
@@ -84,9 +102,12 @@ struct SwapperStats {
   std::atomic<usize> total_faults = 0;
   std::atomic<usize> demand_zeros = 0;
   std::atomic<usize> swap_ins = 0;
+  // evictions of dirty pages
   std::atomic<usize> swap_outs = 0;
-  // evictions that skip write-back
-  std::atomic<usize> clean_evictions = 0;
+  // evictions of Mapped clean pages
+  std::atomic<usize> skipped_writes = 0;
+  // evictions of FreshlyMapped clean pages
+  std::atomic<usize> discards = 0;
   // evictions that happened because
   // no free slot was find in the cache
   std::atomic<usize> reactive_evictions = 0;
