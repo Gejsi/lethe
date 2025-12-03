@@ -4,12 +4,29 @@
 #include <cstdint>
 #include <unordered_map>
 
-// TODO: remove this hacky include
-constexpr uintptr_t HEAP_START2 = 0xffff800000000000;
-constexpr size_t HEAP_SIZE2 = (size_t)2 * 1024 * 1024 * 1024;
+class BumpArena {
+public:
+  BumpArena(uintptr_t start, size_t size)
+      : heap_end_(start + size), heap_current_(start) {}
 
-inline std::atomic<uintptr_t> heap_current{HEAP_START2};
-inline const uintptr_t heap_end = HEAP_START2 + HEAP_SIZE2;
+  uintptr_t allocate(size_t bytes, size_t alignment) {
+    uintptr_t old_current = heap_current_.fetch_add(bytes);
+    uintptr_t aligned_current =
+        (old_current + alignment - 1) & ~(alignment - 1);
+
+    if (aligned_current + bytes > heap_end_) {
+      // Return 0 as an indicator of failure instead of throwing,
+      // since allocators shouldn't throw from allocate.
+      // The allocator will handle turning this into an exception.
+      return 0;
+    }
+    return aligned_current;
+  }
+
+private:
+  const uintptr_t heap_end_;
+  std::atomic<uintptr_t> heap_current_;
+};
 
 template <typename T> class BumpAllocator {
 public:
@@ -22,28 +39,27 @@ public:
   using size_type = std::size_t;
   using difference_type = std::ptrdiff_t;
 
-  // Rebind: allows allocator<T> to be converted to allocator<U>
-  template <typename U> struct rebind {
-    using other = BumpAllocator<U>;
-  };
+  BumpArena *arena_;
 
-  BumpAllocator() noexcept = default;
+  explicit BumpAllocator(BumpArena *arena) noexcept : arena_(arena) {}
 
-  template <typename U> BumpAllocator(const BumpAllocator<U> &) noexcept {}
+  template <typename U>
+  BumpAllocator(const BumpAllocator<U> &other) noexcept
+      : arena_(other.arena_) {}
 
   T *allocate(size_t n) {
-    size_t bytes = n * sizeof(T);
-    uintptr_t old_current = heap_current.fetch_add(bytes);
-
-    if (old_current + bytes > heap_end) {
+    if (!arena_) {
       throw std::bad_alloc();
     }
 
-    constexpr size_t alignment = std::max(alignof(T), size_t(8));
-    uintptr_t aligned_current =
-        (old_current + alignment - 1) & ~(alignment - 1);
+    constexpr size_t alignment = alignof(T);
+    size_t bytes = n * sizeof(T);
 
-    return reinterpret_cast<T *>(aligned_current);
+    uintptr_t ptr = arena_->allocate(bytes, alignment);
+    if (ptr == 0) {
+      throw std::bad_alloc();
+    }
+    return reinterpret_cast<T *>(ptr);
   }
 
   void deallocate(T *ptr, size_t n) noexcept {
@@ -51,24 +67,23 @@ public:
     (void)ptr;
     (void)n;
   }
-
-  // Maximum allocatable size
-  size_type max_size() const noexcept { return (HEAP_SIZE2 / sizeof(T)); }
 };
 
 // Equality comparison (all instances are equal - stateless allocator)
 template <typename T, typename U>
-bool operator==(const BumpAllocator<T> &, const BumpAllocator<U> &) noexcept {
-  return true;
+bool operator==(const BumpAllocator<T> &a, const BumpAllocator<U> &b) noexcept {
+  return a.arena_ == b.arena_;
 }
 template <typename T, typename U>
-bool operator!=(const BumpAllocator<T> &, const BumpAllocator<U> &) noexcept {
-  return false;
+bool operator!=(const BumpAllocator<T> &a, const BumpAllocator<U> &b) noexcept {
+  return a.arena_ != b.arena_;
 }
 
 class BumpMapDataLayer : public data_interface<uint64_t> {
 public:
-  BumpMapDataLayer() = default;
+  BumpMapDataLayer(uintptr_t start, size_t size)
+      : arena_(start, size),
+        map_(BumpAllocator<std::pair<const uint64_t, uint64_t>>(&arena_)) {}
 
   int insert(uint64_t key, uint64_t value) override {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -107,6 +122,8 @@ public:
   };
 
 private:
+  BumpArena arena_;
+
   std::unordered_map<
       uint64_t,                // Key
       uint64_t,                // Value

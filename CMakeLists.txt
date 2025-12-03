@@ -131,10 +131,11 @@ set_target_properties(lethe PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_D
 
 # Executable for running the benchmark
 add_executable(run_benchmark
+  ${COMMON_SOURCES}
   ${SRC}/benchmark/run_benchmark.cpp
 )
 # Link the benchmark runner against the pre-built benchmark library
-target_link_libraries(run_benchmark PRIVATE ${KV_BENCHMARK_LIBRARY})
+target_link_libraries(run_benchmark PRIVATE common ${KV_BENCHMARK_LIBRARY})
 # Add the necessary include directory so it can find "benchmark/benchmark.h"
 target_include_directories(run_benchmark SYSTEM PRIVATE ${KV_BENCHMARK_INCLUDE_DIR})
 

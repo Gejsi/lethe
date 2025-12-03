@@ -2,9 +2,8 @@
 #include <cstdio>
 
 #include "bump_map.h"
-#include "dummy_interface.h"
-// #include "linked_bump_map.h"
 #include "std_map.h"
+#include "swapper.h"
 
 // LD_PRELOAD=lib/liblethe.so bin/run_benchmark 1 10000 100000 zipfian 0
 int main(int argc, char **argv) {
@@ -36,7 +35,7 @@ int main(int argc, char **argv) {
                                     .hook = NULL,
                                     .args = NULL};
 
-  BumpMapDataLayer data_layer;
+  BumpMapDataLayer data_layer(HEAP_START, HEAP_SIZE);
   run_benchmark(&bench_config, &data_layer);
   // data_layer.insert(69, 420);
   // printf("Hello! %lu\n", data_layer.get(69));

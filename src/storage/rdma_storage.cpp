@@ -1,6 +1,6 @@
 #define USE_ASYNC_LOGGER
 #include "rdma_storage.h"
-#include "swapper.h"
+#include "utils.h"
 
 RDMAStorage::RDMAStorage(struct ibv_qp *qp,
                          struct ibv_comp_channel *comp_channel,

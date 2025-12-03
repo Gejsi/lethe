@@ -78,6 +78,8 @@ constexpr usize KB = 1024;
 constexpr usize MB = KB * KB;
 constexpr usize GB = MB * KB;
 
+constexpr usize PAGE_SIZE = 4 * KB;
+
 using Clock = std::chrono::steady_clock;
 using TimePoint = Clock::time_point;
 using Milliseconds = std::chrono::milliseconds;

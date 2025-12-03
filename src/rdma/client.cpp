@@ -42,7 +42,7 @@ void virtual_main(void *any) {
     g_swapper->start_background_rebalancing();
   }
 
-  BumpMapDataLayer data_layer;
+  BumpMapDataLayer data_layer(HEAP_START, HEAP_SIZE);
   run_benchmark(bench_config, &data_layer);
 
   g_swapper->print_stats();
