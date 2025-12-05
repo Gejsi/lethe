@@ -4,22 +4,14 @@
 #include <cstdlib>
 #include <list>
 #include <memory>
-#include <vector>
 #include <volimem/idt.h>
 
 #include "concurrentqueue.h"
 #include "storage/storage.h"
 #include "utils.h"
 
-constexpr usize CACHE_SIZE = 112 * MB;
-constexpr usize NUM_PAGES = CACHE_SIZE / PAGE_SIZE;
-constexpr usize SWAP_SIZE = 256 * MB;
-constexpr usize HEAP_SIZE = CACHE_SIZE + SWAP_SIZE;
+constexpr usize SWAP_SIZE = 16 * GB;
 constexpr uptr HEAP_START = 0xffff800000000000;
-constexpr usize NUM_HEAP_PAGES = HEAP_SIZE / PAGE_SIZE;
-constexpr usize NUM_SHARDS = 2048;
-constexpr usize REAP_RESERVE = (usize)(NUM_PAGES * 0.2);
-constexpr usize SHARD_REAP_RESERVE = REAP_RESERVE / NUM_SHARDS;
 
 constexpr bool pte_is_present(u64 pte);
 constexpr bool pte_is_writable(u64 pte);
@@ -32,6 +24,40 @@ void clear_permissions(uptr vaddr, u64 flags);
 void map_gva(uptr gva, uptr gpa);
 // Unmap a page from the guest page table
 void unmap_gva(uptr gva);
+
+struct SwapperConfig {
+  usize cache_size = 516 * GB;
+  usize num_shards = 4096;
+  bool rebalancer_disabled = false;
+
+  usize num_pages;
+  usize heap_size;
+  usize num_heap_pages;
+  usize reap_reserve;
+  usize shard_reap_reserve;
+
+  // Rebalancer AIMD Configuration
+  // u32 min_interval_ms;
+  // u32 max_interval_ms;
+  // u32 additive_increase_ms;
+  // float multiplicative_decrease_factor;
+  // u8 pressure_threshold;
+  // u8 cooldown_cycles;
+
+  SwapperConfig() = default;
+
+  // move constructor: derives values when moved
+  SwapperConfig(SwapperConfig &&other) noexcept
+      : cache_size(other.cache_size), num_shards(other.num_shards),
+        rebalancer_disabled(other.rebalancer_disabled),
+        num_pages(cache_size / PAGE_SIZE), heap_size(cache_size + SWAP_SIZE),
+        num_heap_pages(heap_size / PAGE_SIZE),
+        reap_reserve((usize)((double)num_pages * 0.2)),
+        shard_reap_reserve(reap_reserve / num_shards) {}
+
+  SwapperConfig(const SwapperConfig &) = delete;
+  SwapperConfig &operator=(const SwapperConfig &) = delete;
+};
 
 enum class PageState : u8 {
   // Cache slot is empty: access triggers a demand-zero allocation
@@ -120,7 +146,7 @@ struct SwapperStats {
 
 class Swapper {
 public:
-  Swapper(std::unique_ptr<Storage> storage);
+  Swapper(SwapperConfig &&swapper_config, std::unique_ptr<Storage> storage);
   ~Swapper();
 
   // The main entry point called by VoliMem on a page fault
@@ -141,6 +167,8 @@ public:
   void print_state();
 
   void print_stats();
+
+  SwapperConfig config;
 
 private:
   // TODO: improve error handling of these two methods
@@ -168,7 +196,7 @@ private:
   // TODO: implement my own simpler lock-free queue
   moodycamel::ConcurrentQueue<Page *> free_pages_queue_;
 
-  std::vector<Shard> shards_;
+  std::unique_ptr<Shard[]> shards_;
 
   // Track the state of all pages, both on the cache and on the swap area
   std::unique_ptr<std::atomic<PageState>[]> page_states_;
@@ -183,8 +211,8 @@ private:
   u32 stable_cycles_ = 0;
   void adapt_rebalance_interval();
   // AIMD constants
-  static constexpr u32 MIN_INTERVAL_MS = 10;  // most aggressive
-  static constexpr u32 MAX_INTERVAL_MS = 200; // most relaxed
+  static constexpr u32 MIN_INTERVAL_MS = 10;   // most aggressive
+  static constexpr u32 MAX_INTERVAL_MS = 2000; // most relaxed
   static constexpr u32 ADDITIVE_INCREASE_MS = 10;
   static constexpr float MULTIPLICATIVE_DECREASE_FACTOR = 0.5;
   // react if >n sync evictions happen in one cycle

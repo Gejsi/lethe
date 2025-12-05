@@ -1,5 +1,7 @@
 #pragma once
 
+#include <mutex>
+
 #include "rdma/common.h"
 #include "storage.h"
 
@@ -35,4 +37,6 @@ private:
   struct ibv_comp_channel *comp_channel_;
   struct ibv_mr *local_cache_mr_;
   const rdma_buffer_attr &remote_swap_metadata_;
+
+  std::mutex mutex_;
 };

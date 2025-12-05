@@ -19,6 +19,9 @@ int RDMAStorage::write_page(void *local_src, u64 remote_offset) {
 
 int RDMAStorage::perform_rdma_op(void *local_addr, u64 remote_offset,
                                  ibv_wr_opcode opcode) {
+
+  std::lock_guard<std::mutex> lock(mutex_);
+
   struct ibv_sge sge;
   sge.addr = (u64)local_addr;
   sge.length = PAGE_SIZE;

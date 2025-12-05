@@ -35,7 +35,7 @@ int main(int argc, char **argv) {
                                     .hook = NULL,
                                     .args = NULL};
 
-  BumpMapDataLayer data_layer(HEAP_START, HEAP_SIZE);
+  BumpMapDataLayer data_layer(HEAP_START, 0);
   run_benchmark(&bench_config, &data_layer);
   // data_layer.insert(69, 420);
   // printf("Hello! %lu\n", data_layer.get(69));

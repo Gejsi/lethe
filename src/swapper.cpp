@@ -34,10 +34,14 @@ void unmap_gva(uptr gva) {
   mapper_t::flush(gva, PAGE_SIZE);
 }
 
-Swapper::Swapper(std::unique_ptr<Storage> storage)
-    : storage_(std::move(storage)), pages_(std::make_unique<Page[]>(NUM_PAGES)),
-      shards_(NUM_SHARDS),
-      page_states_(std::make_unique<std::atomic<PageState>[]>(NUM_HEAP_PAGES)) {
+Swapper::Swapper(SwapperConfig &&swapper_config,
+                 std::unique_ptr<Storage> storage)
+    : config(std::move(swapper_config)), storage_(std::move(storage)),
+      pages_(std::make_unique<Page[]>(config.num_pages)),
+      shards_(std::make_unique<Shard[]>(config.num_shards)),
+      page_states_(
+          std::make_unique<std::atomic<PageState>[]>(config.num_heap_pages)) {
+  // AsyncLogger::instance().init("swapper.log");
 
   cache_base_addr_ = storage_->get_cache_base_addr();
   if (!cache_base_addr_) {
@@ -45,25 +49,29 @@ Swapper::Swapper(std::unique_ptr<Storage> storage)
         "Swapper initialized with a storage backend that has no cache address");
   }
 
-  for (size_t i = 0; i < NUM_PAGES; i++) {
+  for (size_t i = 0; i < config.num_pages; i++) {
     free_pages_queue_.enqueue(&pages_[i]);
   }
 
-  for (size_t i = 0; i < NUM_HEAP_PAGES; ++i) {
+  for (size_t i = 0; i < config.num_heap_pages; ++i) {
     page_states_[i].store(PageState::Unmapped, std::memory_order_relaxed);
   }
 
-  INFO("Swapper initialized with %zu cache slots", NUM_PAGES);
-
-  AsyncLogger::instance().init("swapper.log");
+  INFO("Swapper initialized with %zu cache slots and %zu shards to handle them",
+       config.num_pages, config.num_shards);
 }
 
 Swapper::~Swapper() { DEBUG("Destroyed Swapper"); }
 
 void Swapper::start_background_rebalancing() {
+  if (config.rebalancer_disabled) {
+    printf("Disabled\n");
+    return;
+  }
+
   rebalancer_ = std::thread([this]() {
-    std::vector<size_t> shard_indices(NUM_SHARDS);
-    for (size_t i = 0; i < NUM_SHARDS; ++i)
+    std::vector<size_t> shard_indices(config.num_shards);
+    for (size_t i = 0; i < config.num_shards; ++i)
       shard_indices[i] = i;
 
     std::random_device rd;
@@ -101,6 +109,11 @@ void Swapper::start_background_rebalancing() {
 }
 
 void Swapper::stop_background_rebalancing() {
+  if (config.rebalancer_disabled) {
+    printf("Disabled\n");
+    return;
+  }
+
   rebalancer_running_ = false;
 
   if (rebalancer_.joinable()) {
@@ -129,13 +142,13 @@ void Swapper::print_state() {
   // }
 
   size_t mapped_count = 0;
-  for (size_t i = 0; i < NUM_HEAP_PAGES; ++i) {
+  for (size_t i = 0; i < config.num_heap_pages; ++i) {
     if (page_states_[i].load() != PageState::Unmapped) {
       mapped_count++;
     }
   }
   printf("=== Mappings (%zu) ===\n", mapped_count);
-  for (size_t i = 0; i < NUM_HEAP_PAGES; ++i) {
+  for (size_t i = 0; i < config.num_heap_pages; ++i) {
     PageState state = page_states_[i].load();
     if (state != PageState::Unmapped) {
       uptr vaddr = HEAP_START + (i * PAGE_SIZE);
@@ -251,7 +264,7 @@ usize Swapper::get_heap_idx(uptr vaddr) {
 }
 
 usize Swapper::get_shard_idx(uptr vaddr) {
-  return (vaddr / PAGE_SIZE) % NUM_SHARDS;
+  return (vaddr / PAGE_SIZE) % config.num_shards;
 }
 
 Page *Swapper::acquire_page(Shard &shard) {
@@ -331,16 +344,12 @@ void Swapper::swap_out_page(Page *page) {
   usize heap_idx = get_heap_idx(victim_vaddr);
   PageState page_state = page_states_[heap_idx].load();
 
-  // revoke permissions except the dirty bit:
-  // this enables an optimization where clean pages
-  // can be unmapped without any backend write-back
-  clear_permissions(victim_vaddr, PTE_P | PTE_W | PTE_A);
-
   auto perms = mapper_t::get_protect(victim_vaddr);
-  DEBUG("Evicted %s (is dirty: %s)", page_state_to_str(page_state),
-        pte_is_dirty(perms) ? "true" : "false");
+  bool is_dirty = pte_is_dirty(perms);
 
-  if (pte_is_dirty(perms)) {
+  unmap_gva(victim_vaddr);
+
+  if (is_dirty) {
     // dirty page: write to storage
     auto victim_offset = victim_vaddr - HEAP_START;
     auto cache_gva = get_cache_gva(page);
@@ -377,7 +386,6 @@ void Swapper::swap_out_page(Page *page) {
         page_state_to_str(page_state), victim_vaddr);
   }
 
-  unmap_gva(victim_vaddr);
   page->reset();
 }
 
@@ -392,9 +400,9 @@ void Swapper::handle_fault(void *fault_addr, regstate_t *regstate) {
 
   // faulting address should be within the heap
   if (aligned_fault_vaddr < HEAP_START ||
-      aligned_fault_vaddr >= HEAP_START + HEAP_SIZE) {
+      aligned_fault_vaddr >= HEAP_START + config.heap_size) {
     PANIC("Fault address 0x%lx outside of heap range [0x%lx, 0x%lx)",
-          aligned_fault_vaddr, HEAP_START, HEAP_START + HEAP_SIZE);
+          aligned_fault_vaddr, HEAP_START, HEAP_START + config.heap_size);
   }
 
   stats_.total_faults++;
@@ -459,14 +467,15 @@ void Swapper::promote_hot_pages(Shard &shard) {
 }
 
 void Swapper::reap_cold_pages(Shard &shard) {
-  if (free_pages_queue_.size_approx() >= REAP_RESERVE) {
+  if (free_pages_queue_.size_approx() >= config.reap_reserve) {
     return;
   }
 
   usize evictions = 0;
 
   // try to keep some amount of free space in the shard
-  while (!shard.inactive_pages.empty() && evictions < SHARD_REAP_RESERVE) {
+  while (!shard.inactive_pages.empty() &&
+         evictions < config.shard_reap_reserve) {
     Page *victim_page = shard.inactive_pages.back();
     shard.inactive_pages.pop_back();
 

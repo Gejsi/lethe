@@ -12,13 +12,6 @@
 #include "storage/rdma_storage.h"
 #include "swapper.h"
 
-void usage() {
-  printf("Usage:\n");
-  printf("client [-a <server_addr>] [-p <server_port>]\n");
-  printf("(default port: %d)\n", DEFAULT_RDMA_PORT);
-  exit(1);
-}
-
 void handle_fault(void *fault_addr, regstate_t *regstate) {
   if (!g_swapper) {
     PANIC("Swapper not setup");
@@ -32,35 +25,42 @@ void virtual_main(void *any) {
 
   s_benchmark_config_t *bench_config = (s_benchmark_config_t *)any;
 
-  auto seg = new segment_t(HEAP_SIZE, HEAP_START);
+  auto seg = new segment_t(g_swapper->config.heap_size, HEAP_START);
   mapper_t::assign_handler(seg, handle_fault);
   INFO("Fault handling segment registered: [0x%lx, 0x%lx)", HEAP_START,
-       (uptr)HEAP_START + HEAP_SIZE);
+       (uptr)HEAP_START + g_swapper->config.heap_size);
 
-  const char *rebalancer_env = std::getenv("REBALANCE");
-  if (rebalancer_env && std::string(rebalancer_env) == "1") {
-    g_swapper->start_background_rebalancing();
-  }
+  g_swapper->start_background_rebalancing();
 
-  BumpMapDataLayer data_layer(HEAP_START, HEAP_SIZE);
+  // LinkedBumpMapDataLayer data_layer;
+  BumpMapDataLayer data_layer(HEAP_START, g_swapper->config.heap_size);
   run_benchmark(bench_config, &data_layer);
 
   g_swapper->print_stats();
 
-  if (rebalancer_env && std::string(rebalancer_env) == "1") {
-    g_swapper->stop_background_rebalancing();
-  }
+  g_swapper->stop_background_rebalancing();
 
   DEBUG("--- Exiting VM ---");
 }
 
 int main(int argc, char **argv) {
+  SwapperConfig swapper_config;
+
   if (argc < 6) {
-    printf("Usage: %s <NUM_THREADS> <LOAD_NUM_KEYS> <NUM_OPS> <DISTRIBUTION> "
-           "<WORKLOAD>\n",
-           argv[0]);
+    printf("Usage: %s <NUM_THREADS> ... <WORKLOAD> [options]\n", argv[0]);
+    printf("Options:\n");
+    printf("  -a <ip>        Server address\n");
+    printf("  -p <port>      Server port (default: %d)\n", DEFAULT_RDMA_PORT);
+    printf(
+        "  -c, --cache-gb <size>  Cache size in gigabytes (default: %zu MB)\n",
+        swapper_config.cache_size / MB);
+    printf("  -n, --no-rebalancer <0|1> Toggle rebalancer (default: %d)\n",
+           swapper_config.rebalancer_disabled);
+    printf("  -S, --num-shards <num> Number of LRU shards (default: %zu)\n",
+           swapper_config.num_shards);
     exit(1);
   }
+
   const unsigned int num_threads = (unsigned int)atoi(argv[1]);
   const unsigned int load_num_keys = (unsigned int)atoi(argv[2]);
   const unsigned int num_ops = (unsigned int)atoi(argv[3]);
@@ -73,8 +73,8 @@ int main(int argc, char **argv) {
                                     .num_ops = num_ops,
                                     .distribution = distribution,
                                     .workload = workload,
-                                    .output_file = "./data/outputfile",
-                                    .data_dir = "./data",
+                                    .output_file = "./bigdata/outputfile",
+                                    .data_dir = "./bigdata",
                                     .tsc = 2095008,
                                     .metric = METRIC::THROUGHPUT,
                                     .hook = NULL,
@@ -94,8 +94,17 @@ int main(int argc, char **argv) {
     return -1;
   }
 
+  int option_index = 0;
+  struct option long_options[] = {{"cache-gb", required_argument, 0, 'c'},
+                                  {"cache-mb", required_argument, 0, 'm'},
+                                  {"rebalancer", required_argument, 0, 'n'},
+                                  {"num-shards", required_argument, 0, 'S'},
+
+                                  {0, 0, 0, 0}};
+
   int option;
-  while ((option = getopt(argc, argv, "a:p:")) != -1) {
+  while ((option = getopt_long(argc, argv, "a:p:c:m:n:S:", long_options,
+                               &option_index)) != -1) {
     switch (option) {
     case 'a':
       ret = get_addr(optarg, (struct sockaddr *)&server_sockaddr);
@@ -107,8 +116,21 @@ int main(int argc, char **argv) {
     case 'p':
       server_sockaddr.sin_port = htons((u16)strtol(optarg, NULL, 0));
       break;
+    case 'c':
+      swapper_config.cache_size = (usize)atol(optarg) * GB;
+      break;
+    case 'm':
+      swapper_config.cache_size = (usize)atol(optarg) * MB;
+      break;
+    case 'n':
+      swapper_config.rebalancer_disabled = (bool)atoi(optarg);
+      break;
+    case 'S':
+      swapper_config.num_shards = (usize)atol(optarg);
+      break;
     default:
-      usage();
+      fprintf(stderr, "Unknown option or missing argument for option '%c'\n",
+              option);
       break;
     }
   }
@@ -142,7 +164,7 @@ int main(int argc, char **argv) {
 
   /* The cache where RDMA operations source and sink */
   cache_area =
-      rdma_buffer_alloc(pd, PAGE_SIZE, CACHE_SIZE,
+      rdma_buffer_alloc(pd, PAGE_SIZE, swapper_config.cache_size,
                         static_cast<ibv_access_flags>(IBV_ACCESS_LOCAL_WRITE |
                                                       IBV_ACCESS_REMOTE_READ |
                                                       IBV_ACCESS_REMOTE_WRITE));
@@ -156,7 +178,8 @@ int main(int argc, char **argv) {
     auto rdma_storage = std::make_unique<RDMAStorage>(
         client_qp, io_completion_channel, cache_area, swap_area_metadata);
 
-    auto swapper = std::make_unique<Swapper>(std::move(rdma_storage));
+    auto swapper = std::make_unique<Swapper>(std::move(swapper_config),
+                                             std::move(rdma_storage));
     g_swapper = swapper.get();
 
     constexpr s_volimem_config_t voli_config{

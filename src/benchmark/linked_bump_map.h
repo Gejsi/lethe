@@ -125,7 +125,8 @@ template <typename T> struct LinkedBumpAllocator {
 
   LinkedBumpAllocator() {
     constexpr uintptr_t HEAP_START = 0xffff800000000000;
-    constexpr size_t HEAP_SIZE = (size_t)2 * 1024 * 1024 * 1024;
+    constexpr size_t HEAP_SIZE =
+        (size_t)16 * 1024 * 1024 * 1024 + (112 * 1024 * 1024);
 
     if (!g_heap_allocator) {
       printf("Initializing allocator on hardcoded HEAP_START...\n");

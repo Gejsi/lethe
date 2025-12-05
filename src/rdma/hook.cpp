@@ -56,10 +56,10 @@ static void virtual_main(void *any) {
   DEBUG("Running on the vCPU apic %lu", local_vcpu->lapic_id);
   DEBUG("Root page table is at %p", (void *)mapper_t::get_root());
 
-  auto seg = new segment_t(HEAP_SIZE, HEAP_START);
+  auto seg = new segment_t(g_swapper->config.heap_size, HEAP_START);
   mapper_t::assign_handler(seg, handle_fault);
   INFO("Fault handling segment registered: [0x%lx, 0x%lx)", HEAP_START,
-       (uptr)HEAP_START + HEAP_SIZE);
+       (uptr)HEAP_START + g_swapper->config.heap_size);
 
   // g_swapper->launch_background_rebalancing();
 
@@ -76,6 +76,8 @@ extern "C" int __libc_start_main(int (*main)(int, char **, char **), int argc,
                                  int (*init)(int, char **, char **),
                                  void (*fini)(), void (*rtld_fini)(),
                                  void *stack_end) {
+  SwapperConfig swapper_config;
+
   // TODO: make these values configurable
   struct sockaddr_in server_sockaddr;
   memset(&server_sockaddr, 0, sizeof(server_sockaddr));
@@ -109,7 +111,7 @@ extern "C" int __libc_start_main(int (*main)(int, char **, char **), int argc,
 
   /* The cache where RDMA operations source and sink */
   cache_area =
-      rdma_buffer_alloc(pd, PAGE_SIZE, CACHE_SIZE,
+      rdma_buffer_alloc(pd, PAGE_SIZE, swapper_config.cache_size,
                         static_cast<ibv_access_flags>(IBV_ACCESS_LOCAL_WRITE |
                                                       IBV_ACCESS_REMOTE_READ |
                                                       IBV_ACCESS_REMOTE_WRITE));
@@ -119,7 +121,8 @@ extern "C" int __libc_start_main(int (*main)(int, char **, char **), int argc,
 
   auto rdma_storage = std::make_unique<RDMAStorage>(
       client_qp, io_completion_channel, cache_area, swap_area_metadata);
-  auto swapper = std::make_unique<Swapper>(std::move(rdma_storage));
+  auto swapper = std::make_unique<Swapper>(std::move(swapper_config),
+                                           std::move(rdma_storage));
   g_swapper = swapper.get();
 
   static struct libc_start_params param;
