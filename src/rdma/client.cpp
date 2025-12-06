@@ -32,6 +32,10 @@ void virtual_main(void *any) {
 
   g_swapper->start_background_rebalancing();
 
+  // char *ptr = (char *)HEAP_START;
+  // *ptr = 'c';
+  // printf("Read %c\n", *ptr);
+
   // LinkedBumpMapDataLayer data_layer;
   BumpMapDataLayer data_layer(HEAP_START, g_swapper->config.heap_size);
   run_benchmark(bench_config, &data_layer);
@@ -73,8 +77,8 @@ int main(int argc, char **argv) {
                                     .num_ops = num_ops,
                                     .distribution = distribution,
                                     .workload = workload,
-                                    .output_file = "./bigdata/outputfile",
-                                    .data_dir = "./bigdata",
+                                    .output_file = "./data/outputfile",
+                                    .data_dir = "./data",
                                     .tsc = 2095008,
                                     .metric = METRIC::THROUGHPUT,
                                     .hook = NULL,
@@ -109,8 +113,7 @@ int main(int argc, char **argv) {
     case 'a':
       ret = get_addr(optarg, (struct sockaddr *)&server_sockaddr);
       if (ret) {
-        ERROR("Invalid address provided");
-        return ret;
+        PANIC("Invalid address provided");
       }
       break;
     case 'p':
@@ -129,8 +132,7 @@ int main(int argc, char **argv) {
       swapper_config.num_shards = (usize)atol(optarg);
       break;
     default:
-      fprintf(stderr, "Unknown option or missing argument for option '%c'\n",
-              option);
+      ERROR("Unknown option or missing argument for option '%c'", option);
       break;
     }
   }

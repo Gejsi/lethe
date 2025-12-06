@@ -26,8 +26,8 @@ void map_gva(uptr gva, uptr gpa);
 void unmap_gva(uptr gva);
 
 struct SwapperConfig {
-  usize cache_size = 516 * GB;
-  usize num_shards = 4096;
+  usize cache_size = 112 * MB;
+  usize num_shards = 2048;
   bool rebalancer_disabled = false;
 
   usize num_pages;

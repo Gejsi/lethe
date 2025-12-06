@@ -75,6 +75,8 @@ endif()
 add_library(common INTERFACE)
 # Allow `#include "foo.h"` instead of `#include "src/foo.h"`
 target_include_directories(common INTERFACE ${SRC})
+# Allow `#include "external-library.h"` instead of `#include "../external/external-library.h"`
+target_include_directories(common INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/external)
 # Add VoliMem as a system include
 target_include_directories(common SYSTEM INTERFACE ${VOLIMEM_INCLUDE_DIR})
 target_link_libraries(common INTERFACE pthread ${VOLIMEM_LIBRARY})
