@@ -4,31 +4,22 @@
 #include <cstdlib>
 #include <list>
 #include <memory>
+#include <unordered_map>
 #include <volimem/idt.h>
 
+#include "arena.h"
 #include "concurrentqueue.h"
 #include "storage/storage.h"
 #include "utils.h"
 
-constexpr usize SWAP_SIZE = 16 * GB;
+// constexpr usize SWAP_SIZE = 256 * MB;
+constexpr usize SWAP_SIZE = 1 * GB;
 constexpr uptr HEAP_START = 0xffff800000000000;
 
-constexpr bool pte_is_present(u64 pte);
-constexpr bool pte_is_writable(u64 pte);
-constexpr bool pte_is_accessed(u64 pte);
-constexpr bool pte_is_dirty(u64 pte);
-
-void set_permissions(uptr vaddr, u64 flags);
-void clear_permissions(uptr vaddr, u64 flags);
-// Map a virtual page to a physical page
-void map_gva(uptr gva, uptr gpa);
-// Unmap a page from the guest page table
-void unmap_gva(uptr gva);
-
 struct SwapperConfig {
-  usize cache_size = 112 * MB;
-  usize num_shards = 2048;
-  bool rebalancer_disabled = false;
+  usize cache_size = 512 * MB;
+  usize num_shards = 1;
+  bool rebalancer_disabled = true;
 
   usize num_pages;
   usize heap_size;
@@ -49,8 +40,8 @@ struct SwapperConfig {
   // move constructor: derives values when moved
   SwapperConfig(SwapperConfig &&other) noexcept
       : cache_size(other.cache_size), num_shards(other.num_shards),
-        rebalancer_disabled(other.rebalancer_disabled),
-        num_pages(cache_size / PAGE_SIZE), heap_size(cache_size + SWAP_SIZE),
+        rebalancer_disabled(other.rebalancer_disabled), num_pages(1),
+        heap_size(cache_size + SWAP_SIZE),
         num_heap_pages(heap_size / PAGE_SIZE),
         reap_reserve((usize)((double)num_pages * 0.2)),
         shard_reap_reserve(reap_reserve / num_shards) {}
@@ -60,12 +51,13 @@ struct SwapperConfig {
 };
 
 enum class PageState : u8 {
-  // Cache slot is empty: access triggers a demand-zero allocation
+  // NOTE: keep this entry as the first one in the enum
+  // Cache slot is empty: access triggers a demand-zero allocation.
   Unmapped,
 
   // Page is in cache but has NO copy on the storage:
   // basically, a newly allocated demand-zero page.
-  // If evicted while clean, it can be fully discared
+  // If evicted while clean, it can be fully discarded
   FreshlyMapped,
 
   // Page is in cache and HAS a valid copy on the storage:
@@ -105,11 +97,19 @@ struct Page {
       printf("Page { vaddr: 0x%lx }\n", vaddr);
     } else {
       printf("Page {\n");
-      printf("  vaddr: 0x%lx,\n", vaddr);
+      printf("  vaddr: 0x%lx\n", vaddr);
       printf("}\n");
     }
   }
 };
+
+using PageStatesMap =
+    std::unordered_map<usize, PageState, std::hash<usize>, std::equal_to<usize>,
+                       ArenaAllocator<std::pair<const usize, PageState>>>;
+
+using RemoteOffsetsMap =
+    std::unordered_map<usize, u64, std::hash<usize>, std::equal_to<usize>,
+                       ArenaAllocator<std::pair<const usize, u64>>>;
 
 struct alignas(64) Shard {
   std::mutex mutex;
@@ -118,9 +118,22 @@ struct alignas(64) Shard {
   std::list<Page *> active_pages;
   std::list<Page *> inactive_pages;
 
+  // Track the state of pages, both on the cache and on the swap area
+  PageStatesMap page_states;
+
+  RemoteOffsetsMap remote_offsets;
+
   // save the oldest page (back of inactive list).
   // 0 = Empty, UINT64_MAX = Newest.
+  // TODO: use this field
   std::atomic<u64> oldest_age{0};
+
+  Shard(Arena *arena)
+      : page_states(ArenaAllocator<std::pair<const usize, PageState>>(arena)),
+        remote_offsets(ArenaAllocator<std::pair<const usize, u64>>(arena)) {}
+
+  PageState get_page_state(uptr vaddr);
+  void set_page_state(uptr vaddr, PageState page_state);
 };
 
 struct SwapperStats {
@@ -152,9 +165,12 @@ public:
   // The main entry point called by VoliMem on a page fault
   void handle_fault(void *fault_addr, regstate_t *regstate);
 
-  // Starts the background thread for LRU rebalancing
+  void handle_alloc(u64 vaddr, u64 len);
+  void handle_dealloc(u64 vaddr, u64 len);
+
+  // Starts the LRU-rebalancing background thread
   void start_background_rebalancing();
-  // Stops the background thread for LRU rebalancing
+  // Stops the LRU-rebalancing background thread
   void stop_background_rebalancing();
 
   // Demotion: hot -> cold
@@ -164,23 +180,19 @@ public:
   // Reap: proactively reclaim cold pages if below a reserve target
   void reap_cold_pages(Shard &shard);
 
-  void print_state();
-
   void print_stats();
 
   SwapperConfig config;
 
 private:
   // TODO: improve error handling of these two methods
-  void swap_in_page(Page *page, uptr aligned_fault_vaddr);
+  void swap_in_page(Page *page, uptr fault_vaddr);
   void swap_out_page(Page *page);
 
   // Returns the index of the cache slot where a page is located
   usize get_page_idx(Page *page);
   // Returns the GVA associated with a page
   uptr get_cache_gva(Page *page);
-  // Returns the index of the heap slot where a page is located
-  usize get_heap_idx(uptr vaddr);
   // Returns the index of the shard where a page is handled
   usize get_shard_idx(uptr vaddr);
 
@@ -193,13 +205,21 @@ private:
   // is located in the physical cache
   std::unique_ptr<Page[]> pages_;
   // Unmapped pages in the cache
-  // TODO: implement my own simpler lock-free queue
   moodycamel::ConcurrentQueue<Page *> free_pages_queue_;
 
-  std::unique_ptr<Shard[]> shards_;
+  // 512MB for metadata allows tracking ~32GB of RAM,
+  // assuming 16 bytes overhead per 4KB page
+  Arena metadata_arena_;
 
-  // Track the state of all pages, both on the cache and on the swap area
-  std::unique_ptr<std::atomic<PageState>[]> page_states_;
+  // std::unique_ptr<Shard[]> shards_;
+  // Contiguous array of shards whose allocation must be manually managed
+  Shard *shards_;
+
+  // TODO: Use an more appropriate way of handling remote offsets.
+  // Pages that have been swapped out need a remote offset assigned:
+  // the easiest approach is simply bumping an offset
+  // at the cost of leaking memory.
+  std::atomic<u64> next_swap_offset_{0};
 
   std::thread rebalancer_;
   std::atomic<bool> rebalancer_running_{true};

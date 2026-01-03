@@ -1,3 +1,5 @@
+#pragma once
+
 #include <benchmark/data_interface.h>
 #include <cstdint>
 #include <cstring>

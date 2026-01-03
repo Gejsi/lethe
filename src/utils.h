@@ -79,6 +79,8 @@ constexpr usize MB = KB * KB;
 constexpr usize GB = MB * KB;
 
 constexpr usize PAGE_SIZE = 4 * KB;
+// Align to page boundary
+#define ALIGN_DOWN(x) ((x) & ~((PAGE_SIZE) - 1))
 
 using Clock = std::chrono::steady_clock;
 using TimePoint = Clock::time_point;

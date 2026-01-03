@@ -4,8 +4,9 @@
 #include <random>
 #include <volimem/mapper.h>
 
-#define USE_ASYNC_LOGGER
+// #define USE_ASYNC_LOGGER
 #include "swapper.h"
+#include "utils.h"
 
 constexpr bool pte_is_present(u64 pte) { return pte & PTE_P; }
 constexpr bool pte_is_writable(u64 pte) { return pte & PTE_W; }
@@ -23,10 +24,12 @@ void clear_permissions(uptr vaddr, u64 flags) {
   mapper_t::flush(vaddr, PAGE_SIZE);
 }
 
+// Map a virtual page to a physical page
 void map_gva(uptr gva, uptr gpa) {
   mapper_t::map_gpt(gva, gpa, PAGE_SIZE, PTE_P | PTE_W);
 }
 
+// Unmap a page from the guest page table
 void unmap_gva(uptr gva) {
   // unmap the page from the guest page table
   mapper_t::unmap(gva, PAGE_SIZE);
@@ -34,13 +37,24 @@ void unmap_gva(uptr gva) {
   mapper_t::flush(gva, PAGE_SIZE);
 }
 
+constexpr usize vaddr_to_vpn(uptr vaddr) { return vaddr / PAGE_SIZE; }
+constexpr uptr vpn_to_vaddr(usize vpn) { return vpn * PAGE_SIZE; }
+
+PageState Shard::get_page_state(uptr vaddr) {
+  usize vpn = vaddr_to_vpn(vaddr);
+  return page_states[vpn];
+}
+
+void Shard::set_page_state(uptr vaddr, PageState page_state) {
+  usize vpn = vaddr_to_vpn(vaddr);
+  page_states[vpn] = page_state;
+}
+
 Swapper::Swapper(SwapperConfig &&swapper_config,
                  std::unique_ptr<Storage> storage)
     : config(std::move(swapper_config)), storage_(std::move(storage)),
       pages_(std::make_unique<Page[]>(config.num_pages)),
-      shards_(std::make_unique<Shard[]>(config.num_shards)),
-      page_states_(
-          std::make_unique<std::atomic<PageState>[]>(config.num_heap_pages)) {
+      metadata_arena_(512 * MB) {
   // AsyncLogger::instance().init("swapper.log");
 
   cache_base_addr_ = storage_->get_cache_base_addr();
@@ -49,30 +63,46 @@ Swapper::Swapper(SwapperConfig &&swapper_config,
         "Swapper initialized with a storage backend that has no cache address");
   }
 
-  for (size_t i = 0; i < config.num_pages; i++) {
+  for (usize i = 0; i < config.num_pages; i++) {
     free_pages_queue_.enqueue(&pages_[i]);
   }
 
-  for (size_t i = 0; i < config.num_heap_pages; ++i) {
-    page_states_[i].store(PageState::Unmapped, std::memory_order_relaxed);
+  // manually allocate memory to hold the shards
+  shards_ = static_cast<Shard *>(operator new[](
+      sizeof(Shard) * config.num_shards, std::align_val_t{alignof(Shard)}));
+  // placement-new each shard
+  for (usize i = 0; i < config.num_shards; ++i) {
+    new (&shards_[i]) Shard(&metadata_arena_);
   }
+
+  // for (usize i = 0; i < config.num_heap_pages; ++i) {
+  //   page_states_[i].store(PageState::Unmapped, std::memory_order_relaxed);
+  // }
 
   INFO("Swapper initialized with %zu cache slots and %zu shards to handle them",
        config.num_pages, config.num_shards);
 }
 
-Swapper::~Swapper() { DEBUG("Destroyed Swapper"); }
+Swapper::~Swapper() {
+  // manually deallocate shards
+  for (usize i = 0; i < config.num_shards; ++i) {
+    shards_[i].~Shard();
+  }
+  operator delete[](shards_, std::align_val_t{alignof(Shard)});
+
+  DEBUG("Destroyed Swapper");
+}
 
 void Swapper::start_background_rebalancing() {
   if (config.rebalancer_disabled) {
-    printf("Disabled\n");
     return;
   }
 
   rebalancer_ = std::thread([this]() {
-    std::vector<size_t> shard_indices(config.num_shards);
-    for (size_t i = 0; i < config.num_shards; ++i)
+    std::vector<usize> shard_indices(config.num_shards);
+    for (usize i = 0; i < config.num_shards; ++i) {
       shard_indices[i] = i;
+    }
 
     std::random_device rd;
     std::default_random_engine rng(rd());
@@ -110,7 +140,6 @@ void Swapper::start_background_rebalancing() {
 
 void Swapper::stop_background_rebalancing() {
   if (config.rebalancer_disabled) {
-    printf("Disabled\n");
     return;
   }
 
@@ -121,136 +150,6 @@ void Swapper::stop_background_rebalancing() {
   }
 }
 
-void Swapper::print_state() {
-  // printf("Num pages: %zu -> Free: %zu, Inactive: %zu, Active: %zu\n",
-  // NUM_PAGES,
-  //        free_pages_.size(), inactive_pages_.size(), active_pages_.size());
-
-  // printf("=== Free Pages (%zu) ===\n", free_pages_.size());
-  // for (auto p : free_pages_) {
-  //   p->print();
-  // }
-
-  // printf("=== Inactive Pages (%zu) ===\n", inactive_pages_.size());
-  // for (auto p : inactive_pages_) {
-  //   p->print();
-  // }
-
-  // printf("=== Active Pages (%zu) ===\n", active_pages_.size());
-  // for (auto p : active_pages_) {
-  //   p->print();
-  // }
-
-  size_t mapped_count = 0;
-  for (size_t i = 0; i < config.num_heap_pages; ++i) {
-    if (page_states_[i].load() != PageState::Unmapped) {
-      mapped_count++;
-    }
-  }
-  printf("=== Mappings (%zu) ===\n", mapped_count);
-  for (size_t i = 0; i < config.num_heap_pages; ++i) {
-    PageState state = page_states_[i].load();
-    if (state != PageState::Unmapped) {
-      uptr vaddr = HEAP_START + (i * PAGE_SIZE);
-      printf("0x%lx -> %s\n", vaddr, page_state_to_str(state));
-    }
-  }
-}
-
-void Swapper::print_stats() {
-  usize total_faults = stats_.total_faults.load();
-  usize swap_ins = stats_.swap_ins.load();
-  usize swap_outs = stats_.swap_outs.load();
-  usize skipped_writes = stats_.skipped_writes.load();
-  usize discards = stats_.discards.load();
-  usize reactive_evictions = stats_.reactive_evictions.load();
-  usize proactive_evictions = stats_.proactive_evictions.load();
-  usize promotions = stats_.promotions.load();
-
-  // total evictions, categorized by content (dirty/clean)
-  usize total_evictions_by_content = swap_outs + skipped_writes + discards;
-  // total evictions, categorized by trigger (proactive/reactive)
-  usize total_evictions_by_trigger = proactive_evictions + reactive_evictions;
-  ENSURE(total_evictions_by_content == total_evictions_by_trigger,
-         "Number of total evictions doesn't match");
-
-  double swap_in_ratio =
-      (total_faults > 0)
-          ? static_cast<double>(swap_ins) / static_cast<double>(total_faults)
-          : 0.0;
-
-  double churn_rate = (total_evictions_by_content > 0)
-                          ? static_cast<double>(swap_ins) /
-                                static_cast<double>(total_evictions_by_content)
-                          : 0.0;
-
-  double dirty_ratio = (total_evictions_by_content > 0)
-                           ? static_cast<double>(swap_outs) /
-                                 static_cast<double>(total_evictions_by_content)
-                           : 0.0;
-
-  double proactive_efficiency =
-      (total_evictions_by_trigger > 0)
-          ? static_cast<double>(proactive_evictions) /
-                static_cast<double>(total_evictions_by_trigger)
-          : 0.0;
-
-  double stall_rate = (total_evictions_by_trigger > 0)
-                          ? static_cast<double>(reactive_evictions) /
-                                static_cast<double>(total_evictions_by_trigger)
-                          : 0.0;
-
-  double promotion_ratio =
-      (promotions + total_evictions_by_content > 0)
-          ? static_cast<double>(promotions) /
-                static_cast<double>(promotions + total_evictions_by_content)
-          : 0.0;
-
-  printf("=================================================================\n");
-  printf("PERFORMANCE METRICS:\n");
-  printf("  - Swap-In Ratio:        %.2f%% (%.0f / %.0f faults were for "
-         "remote pages)\n",
-         swap_in_ratio * 100.0, static_cast<double>(swap_ins),
-         static_cast<double>(total_faults));
-  printf("  - Swap-Out Ratio:       %.2f%% (%.0f / %.0f evictions required a "
-         "write-back)\n",
-         dirty_ratio * 100.0, static_cast<double>(swap_outs),
-         static_cast<double>(total_evictions_by_content));
-  printf("  - Proactive Efficiency: %.2f%% (%.0f / %.0f total evictions were "
-         "proactive)\n",
-         proactive_efficiency * 100.0, static_cast<double>(proactive_evictions),
-         static_cast<double>(total_evictions_by_trigger));
-  printf("  - Stall Rate:           %.2f%% (%.0f / %.0f total evictions "
-         "stalled the app)\n",
-         stall_rate * 100.0, static_cast<double>(reactive_evictions),
-         static_cast<double>(total_evictions_by_trigger));
-  printf("  - Churn Rate:           %.2f%% (%.0f / %.0f swap-ins over "
-         "evictions)\n",
-         churn_rate * 100.0, static_cast<double>(swap_ins),
-         static_cast<double>(total_evictions_by_content));
-  printf("  - Promotion Ratio:      %.2f%% (%.0f / %.0f inactive pages were "
-         "promoted)\n",
-         promotion_ratio * 100.0, static_cast<double>(promotions),
-         static_cast<double>(promotions + total_evictions_by_content));
-
-  printf("\nCOUNTERS:\n");
-  printf("  - Total Page Faults:    %zu\n", total_faults);
-  printf("    - Demand Zeros:       %zu\n", stats_.demand_zeros.load());
-  printf("    - Swap-Ins:           %zu\n", swap_ins);
-  printf("  - Total Evictions:      %zu\n", total_evictions_by_content);
-  printf("    - Swap-Outs:          %zu\n", swap_outs);
-  printf("    - Skipped writes:     %zu\n", skipped_writes);
-  printf("    - Discards:           %zu\n", discards);
-  printf("  - Eviction Triggers:\n");
-  printf("    - Proactive (Reaper): %zu\n", proactive_evictions);
-  printf("    - Reactive (Stall):   %zu\n", reactive_evictions);
-  printf("  - LRU List Activity:\n");
-  printf("    - Promotions:         %zu\n", promotions);
-  printf("    - Demotions:          %zu\n", stats_.demotions.load());
-  printf("    - Rebalancer skips:   %zu\n", stats_.rebalancer_skips.load());
-  printf("=================================================================\n");
-}
-
 usize Swapper::get_page_idx(Page *page) { return (usize)(page - pages_.get()); }
 
 uptr Swapper::get_cache_gva(Page *page) {
@@ -259,12 +158,8 @@ uptr Swapper::get_cache_gva(Page *page) {
   return (uptr)cache_base_addr_ + cache_offset;
 }
 
-usize Swapper::get_heap_idx(uptr vaddr) {
-  return (vaddr - HEAP_START) / PAGE_SIZE;
-}
-
 usize Swapper::get_shard_idx(uptr vaddr) {
-  return (vaddr / PAGE_SIZE) % config.num_shards;
+  return vaddr_to_vpn(vaddr) % config.num_shards;
 }
 
 Page *Swapper::acquire_page(Shard &shard) {
@@ -301,48 +196,54 @@ Page *Swapper::acquire_page(Shard &shard) {
   return victim_page;
 }
 
-void Swapper::swap_in_page(Page *page, uptr aligned_fault_vaddr) {
-  usize heap_idx = get_heap_idx(aligned_fault_vaddr);
-  PageState page_state = page_states_[heap_idx].load();
+void Swapper::swap_in_page(Page *page, uptr fault_vaddr) {
+  usize shard_idx = get_shard_idx(fault_vaddr);
+  Shard &shard = shards_[shard_idx];
+  // auto &page_state =
+  //     shard.page_states.try_emplace(fault_vaddr, PageState::Unmapped)
+  //         .first->second;
+  PageState page_state = shard.get_page_state(fault_vaddr);
+  WARN("Shard idx %lu", shard_idx);
 
   auto cache_gva = get_cache_gva(page);
   auto cache_gpa = mapper_t::gva_to_gpa((void *)cache_gva);
 
   if (page_state == PageState::Unmapped) {
-    DEBUG("Assigning page for gva 0x%lx", aligned_fault_vaddr);
+    DEBUG("Assigning page for gva 0x%lx", fault_vaddr);
     memset((void *)cache_gva, 0, PAGE_SIZE);
-    page_states_[heap_idx] = PageState::FreshlyMapped;
+    shard.set_page_state(fault_vaddr, PageState::FreshlyMapped);
 
     stats_.demand_zeros++;
   } else if (page_state == PageState::RemotelyMapped) {
     DEBUG("Swapping IN: 0x%lx into cache slot %zu. Cache (gva->gpa): "
           "0x%lx->0x%lx",
-          aligned_fault_vaddr, get_page_idx(page), cache_gva, cache_gpa);
+          fault_vaddr, get_page_idx(page), cache_gva, cache_gpa);
 
-    auto target_offset = aligned_fault_vaddr - HEAP_START;
+    // auto target_offset = fault_vaddr - HEAP_START;
+    auto target_offset = shard.remote_offsets[vaddr_to_vpn(fault_vaddr)];
     int ret = storage_->read_page((void *)cache_gva, target_offset);
     if (ret != 0) {
       PANIC("Failed to swap in: backend read failed (%d)", ret);
     }
 
-    page_states_[heap_idx] = PageState::Mapped;
+    shard.set_page_state(fault_vaddr, PageState::Mapped);
 
     stats_.swap_ins++;
   } else {
     UNREACHABLE(
         "A %s page (0x%lx) shouldn't cause a fault that needs a swap-in",
-        page_state_to_str(page_state), aligned_fault_vaddr);
+        page_state_to_str(page_state), fault_vaddr);
   }
 
-  map_gva(aligned_fault_vaddr, cache_gpa);
-  page->vaddr = aligned_fault_vaddr;
+  map_gva(fault_vaddr, cache_gpa);
+  page->vaddr = fault_vaddr;
 }
 
 void Swapper::swap_out_page(Page *page) {
-  // victim page is the n-th page within the heap
   uptr victim_vaddr = page->vaddr;
-  usize heap_idx = get_heap_idx(victim_vaddr);
-  PageState page_state = page_states_[heap_idx].load();
+  usize shard_idx = get_shard_idx(victim_vaddr);
+  Shard &shard = shards_[shard_idx];
+  PageState page_state = shard.get_page_state(victim_vaddr);
 
   auto perms = mapper_t::get_protect(victim_vaddr);
   bool is_dirty = pte_is_dirty(perms);
@@ -351,7 +252,18 @@ void Swapper::swap_out_page(Page *page) {
 
   if (is_dirty) {
     // dirty page: write to storage
-    auto victim_offset = victim_vaddr - HEAP_START;
+    // auto victim_offset = victim_vaddr - HEAP_START;
+    u64 victim_offset;
+    usize vpn = vaddr_to_vpn(victim_vaddr);
+    auto offset_it = shard.remote_offsets.find(vpn);
+    if (offset_it == shard.remote_offsets.end()) {
+      victim_offset = next_swap_offset_.fetch_add(PAGE_SIZE);
+      shard.remote_offsets[vpn] = victim_offset;
+    } else {
+      // Reuse existing offset
+      victim_offset = offset_it->second;
+    }
+
     auto cache_gva = get_cache_gva(page);
     DEBUG("Swapping OUT: 0x%lx. Cache (gva->gpa): 0x%lx->0x%lx", victim_vaddr,
           cache_gva, mapper_t::gva_to_gpa((void *)cache_gva));
@@ -361,7 +273,7 @@ void Swapper::swap_out_page(Page *page) {
       PANIC("Failed to swap out: backend write failed (%d)", ret);
     }
 
-    page_states_[heap_idx] = PageState::RemotelyMapped;
+    shard.set_page_state(victim_vaddr, PageState::RemotelyMapped);
 
     stats_.swap_outs++;
   } else if (page_state == PageState::Mapped) {
@@ -369,7 +281,7 @@ void Swapper::swap_out_page(Page *page) {
     DEBUG("Evicting clean storage-backed page 0x%lx from cache slot %zu",
           victim_vaddr, get_page_idx(page));
 
-    page_states_[heap_idx] = PageState::RemotelyMapped;
+    shard.set_page_state(victim_vaddr, PageState::RemotelyMapped);
 
     stats_.skipped_writes++;
   } else if (page_state == PageState::FreshlyMapped) {
@@ -377,7 +289,7 @@ void Swapper::swap_out_page(Page *page) {
     DEBUG("Evicting fresh page 0x%lx from cache slot %zu", victim_vaddr,
           get_page_idx(page));
 
-    page_states_[heap_idx] = PageState::Unmapped;
+    shard.set_page_state(victim_vaddr, PageState::Unmapped);
 
     stats_.discards++;
   } else {
@@ -389,33 +301,34 @@ void Swapper::swap_out_page(Page *page) {
   page->reset();
 }
 
+// void Swapper::handle_alloc(u64 vaddr, u64 len) {
+//   for (uptr v = vaddr; v < vaddr + len; v += PAGE_SIZE) {
+//     usize shard_idx = get_shard_idx(v);
+// Shard &shard = shards_[shard_idx];
+// std::lock_guard<std::mutex> lock(shard.mutex);
+// shard.page_states[v] = PageState::Unmapped;
+//   }
+// }
+
 void Swapper::handle_fault(void *fault_addr, regstate_t *regstate) {
   UNUSED(regstate);
 
   DEBUG("Handling fault at %p. Error code: %lu", fault_addr,
         regstate->error_code);
 
-  // align to page boundary
-  uptr aligned_fault_vaddr = (uptr)fault_addr & ~(PAGE_SIZE - 1);
-
-  // faulting address should be within the heap
-  if (aligned_fault_vaddr < HEAP_START ||
-      aligned_fault_vaddr >= HEAP_START + config.heap_size) {
-    PANIC("Fault address 0x%lx outside of heap range [0x%lx, 0x%lx)",
-          aligned_fault_vaddr, HEAP_START, HEAP_START + config.heap_size);
-  }
+  uptr aligned_fault_vaddr = ALIGN_DOWN((uptr)fault_addr);
 
   stats_.total_faults++;
 
   usize shard_idx = get_shard_idx(aligned_fault_vaddr);
   Shard &shard = shards_[shard_idx];
 
-  {
-    std::lock_guard<std::mutex> lock(shard.mutex);
-    Page *page = acquire_page(shard);
-    swap_in_page(page, aligned_fault_vaddr);
-    shard.active_pages.push_front(page);
-  }
+  std::lock_guard<std::mutex> lock(shard.mutex);
+  Page *page = acquire_page(shard);
+  swap_in_page(page, aligned_fault_vaddr);
+  WARN("BEFORE %lu", shard.active_pages.size());
+  shard.active_pages.push_front(page);
+  WARN("AFTER %lu", shard.active_pages.size());
 }
 
 void Swapper::demote_cold_pages(Shard &shard) {
@@ -522,4 +435,98 @@ void Swapper::adapt_rebalance_interval() {
     // if the cooldown threshold wasn't reached,
     // maintain the current interval
   }
+}
+
+void Swapper::print_stats() {
+  usize total_faults = stats_.total_faults.load();
+  usize swap_ins = stats_.swap_ins.load();
+  usize swap_outs = stats_.swap_outs.load();
+  usize skipped_writes = stats_.skipped_writes.load();
+  usize discards = stats_.discards.load();
+  usize reactive_evictions = stats_.reactive_evictions.load();
+  usize proactive_evictions = stats_.proactive_evictions.load();
+  usize promotions = stats_.promotions.load();
+
+  // total evictions, categorized by content (dirty/clean)
+  usize total_evictions_by_content = swap_outs + skipped_writes + discards;
+  // total evictions, categorized by trigger (proactive/reactive)
+  usize total_evictions_by_trigger = proactive_evictions + reactive_evictions;
+  ENSURE(total_evictions_by_content == total_evictions_by_trigger,
+         "Number of total evictions doesn't match");
+
+  double swap_in_ratio =
+      (total_faults > 0)
+          ? static_cast<double>(swap_ins) / static_cast<double>(total_faults)
+          : 0.0;
+
+  double churn_rate = (total_evictions_by_content > 0)
+                          ? static_cast<double>(swap_ins) /
+                                static_cast<double>(total_evictions_by_content)
+                          : 0.0;
+
+  double dirty_ratio = (total_evictions_by_content > 0)
+                           ? static_cast<double>(swap_outs) /
+                                 static_cast<double>(total_evictions_by_content)
+                           : 0.0;
+
+  double proactive_efficiency =
+      (total_evictions_by_trigger > 0)
+          ? static_cast<double>(proactive_evictions) /
+                static_cast<double>(total_evictions_by_trigger)
+          : 0.0;
+
+  double stall_rate = (total_evictions_by_trigger > 0)
+                          ? static_cast<double>(reactive_evictions) /
+                                static_cast<double>(total_evictions_by_trigger)
+                          : 0.0;
+
+  double promotion_ratio =
+      (promotions + total_evictions_by_content > 0)
+          ? static_cast<double>(promotions) /
+                static_cast<double>(promotions + total_evictions_by_content)
+          : 0.0;
+
+  printf("=================================================================\n");
+  printf("PERFORMANCE METRICS:\n");
+  printf("  - Swap-In Ratio:        %.2f%% (%.0f / %.0f faults were for "
+         "remote pages)\n",
+         swap_in_ratio * 100.0, static_cast<double>(swap_ins),
+         static_cast<double>(total_faults));
+  printf("  - Swap-Out Ratio:       %.2f%% (%.0f / %.0f evictions required a "
+         "write-back)\n",
+         dirty_ratio * 100.0, static_cast<double>(swap_outs),
+         static_cast<double>(total_evictions_by_content));
+  printf("  - Proactive Efficiency: %.2f%% (%.0f / %.0f total evictions were "
+         "proactive)\n",
+         proactive_efficiency * 100.0, static_cast<double>(proactive_evictions),
+         static_cast<double>(total_evictions_by_trigger));
+  printf("  - Stall Rate:           %.2f%% (%.0f / %.0f total evictions "
+         "stalled the app)\n",
+         stall_rate * 100.0, static_cast<double>(reactive_evictions),
+         static_cast<double>(total_evictions_by_trigger));
+  printf("  - Churn Rate:           %.2f%% (%.0f / %.0f swap-ins over "
+         "evictions)\n",
+         churn_rate * 100.0, static_cast<double>(swap_ins),
+         static_cast<double>(total_evictions_by_content));
+  printf("  - Promotion Ratio:      %.2f%% (%.0f / %.0f inactive pages were "
+         "promoted)\n",
+         promotion_ratio * 100.0, static_cast<double>(promotions),
+         static_cast<double>(promotions + total_evictions_by_content));
+
+  printf("\nCOUNTERS:\n");
+  printf("  - Total Page Faults:    %zu\n", total_faults);
+  printf("    - Demand Zeros:       %zu\n", stats_.demand_zeros.load());
+  printf("    - Swap-Ins:           %zu\n", swap_ins);
+  printf("  - Total Evictions:      %zu\n", total_evictions_by_content);
+  printf("    - Swap-Outs:          %zu\n", swap_outs);
+  printf("    - Skipped writes:     %zu\n", skipped_writes);
+  printf("    - Discards:           %zu\n", discards);
+  printf("  - Eviction Triggers:\n");
+  printf("    - Proactive (Reaper): %zu\n", proactive_evictions);
+  printf("    - Reactive (Stall):   %zu\n", reactive_evictions);
+  printf("  - LRU List Activity:\n");
+  printf("    - Promotions:         %zu\n", promotions);
+  printf("    - Demotions:          %zu\n", stats_.demotions.load());
+  printf("    - Rebalancer skips:   %zu\n", stats_.rebalancer_skips.load());
+  printf("=================================================================\n");
 }
