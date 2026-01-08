@@ -4,7 +4,7 @@
 #include <random>
 #include <volimem/mapper.h>
 
-// #define USE_ASYNC_LOGGER
+#define USE_ASYNC_LOGGER
 #include "swapper.h"
 #include "utils.h"
 
@@ -42,7 +42,13 @@ constexpr uptr vpn_to_vaddr(usize vpn) { return vpn * PAGE_SIZE; }
 
 PageState Shard::get_page_state(uptr vaddr) {
   usize vpn = vaddr_to_vpn(vaddr);
-  return page_states[vpn];
+
+  auto it = page_states.find(vpn);
+  if (it == page_states.end()) {
+    return PageState::Unmapped;
+  }
+
+  return it->second;
 }
 
 void Shard::set_page_state(uptr vaddr, PageState page_state) {
@@ -54,6 +60,8 @@ Swapper::Swapper(SwapperConfig &&swapper_config,
                  std::unique_ptr<Storage> storage)
     : config(std::move(swapper_config)), storage_(std::move(storage)),
       pages_(std::make_unique<Page[]>(config.num_pages)),
+      free_pages_queue_(std::list<Page *, ArenaAllocator<Page *>>(
+          ArenaAllocator<Page *>(&metadata_arena_))),
       metadata_arena_(512 * MB) {
   // AsyncLogger::instance().init("swapper.log");
 
@@ -64,7 +72,8 @@ Swapper::Swapper(SwapperConfig &&swapper_config,
   }
 
   for (usize i = 0; i < config.num_pages; i++) {
-    free_pages_queue_.enqueue(&pages_[i]);
+    // free_pages_queue_.enqueue(&pages_[i]);
+    free_pages_queue_.push(&pages_[i]);
   }
 
   // manually allocate memory to hold the shards
@@ -165,7 +174,12 @@ usize Swapper::get_shard_idx(uptr vaddr) {
 Page *Swapper::acquire_page(Shard &shard) {
   Page *victim_page = nullptr;
 
-  if (free_pages_queue_.try_dequeue(victim_page)) {
+  // if (free_pages_queue_.try_dequeue(victim_page)) {
+  //   return victim_page;
+  // }
+  if (!free_pages_queue_.empty()) {
+    victim_page = free_pages_queue_.front();
+    free_pages_queue_.pop();
     return victim_page;
   }
 
@@ -203,7 +217,6 @@ void Swapper::swap_in_page(Page *page, uptr fault_vaddr) {
   //     shard.page_states.try_emplace(fault_vaddr, PageState::Unmapped)
   //         .first->second;
   PageState page_state = shard.get_page_state(fault_vaddr);
-  WARN("Shard idx %lu", shard_idx);
 
   auto cache_gva = get_cache_gva(page);
   auto cache_gpa = mapper_t::gva_to_gpa((void *)cache_gva);
@@ -316,19 +329,16 @@ void Swapper::handle_fault(void *fault_addr, regstate_t *regstate) {
   DEBUG("Handling fault at %p. Error code: %lu", fault_addr,
         regstate->error_code);
 
-  uptr aligned_fault_vaddr = ALIGN_DOWN((uptr)fault_addr);
-
   stats_.total_faults++;
 
+  uptr aligned_fault_vaddr = ALIGN_DOWN((uptr)fault_addr);
   usize shard_idx = get_shard_idx(aligned_fault_vaddr);
   Shard &shard = shards_[shard_idx];
 
   std::lock_guard<std::mutex> lock(shard.mutex);
   Page *page = acquire_page(shard);
   swap_in_page(page, aligned_fault_vaddr);
-  WARN("BEFORE %lu", shard.active_pages.size());
   shard.active_pages.push_front(page);
-  WARN("AFTER %lu", shard.active_pages.size());
 }
 
 void Swapper::demote_cold_pages(Shard &shard) {
@@ -380,7 +390,11 @@ void Swapper::promote_hot_pages(Shard &shard) {
 }
 
 void Swapper::reap_cold_pages(Shard &shard) {
-  if (free_pages_queue_.size_approx() >= config.reap_reserve) {
+  // if (free_pages_queue_.size_approx() >= config.reap_reserve) {
+  //   return;
+  // }
+
+  if (free_pages_queue_.size() >= config.reap_reserve) {
     return;
   }
 
@@ -393,7 +407,8 @@ void Swapper::reap_cold_pages(Shard &shard) {
     shard.inactive_pages.pop_back();
 
     swap_out_page(victim_page);
-    free_pages_queue_.enqueue(victim_page);
+    // free_pages_queue_.enqueue(victim_page);
+    free_pages_queue_.push(victim_page);
 
     evictions++;
     stats_.proactive_evictions++;

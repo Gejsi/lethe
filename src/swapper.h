@@ -2,9 +2,8 @@
 
 #include <cstdio>
 #include <cstdlib>
-#include <list>
 #include <memory>
-#include <unordered_map>
+#include <queue>
 #include <volimem/idt.h>
 
 #include "arena.h"
@@ -12,12 +11,13 @@
 #include "storage/storage.h"
 #include "utils.h"
 
-// constexpr usize SWAP_SIZE = 256 * MB;
-constexpr usize SWAP_SIZE = 1 * GB;
+constexpr usize SWAP_SIZE = 512 * MB;
+// constexpr usize SWAP_SIZE = 1 * GB;
 constexpr uptr HEAP_START = 0xffff800000000000;
+// constexpr uptr HEAP_START = 0x0000555500000000UL;
 
 struct SwapperConfig {
-  usize cache_size = 512 * MB;
+  usize cache_size = 128 * MB;
   usize num_shards = 1;
   bool rebalancer_disabled = true;
 
@@ -40,8 +40,8 @@ struct SwapperConfig {
   // move constructor: derives values when moved
   SwapperConfig(SwapperConfig &&other) noexcept
       : cache_size(other.cache_size), num_shards(other.num_shards),
-        rebalancer_disabled(other.rebalancer_disabled), num_pages(1),
-        heap_size(cache_size + SWAP_SIZE),
+        rebalancer_disabled(other.rebalancer_disabled),
+        num_pages(cache_size / PAGE_SIZE), heap_size(cache_size + SWAP_SIZE),
         num_heap_pages(heap_size / PAGE_SIZE),
         reap_reserve((usize)((double)num_pages * 0.2)),
         shard_reap_reserve(reap_reserve / num_shards) {}
@@ -103,33 +103,27 @@ struct Page {
   }
 };
 
-using PageStatesMap =
-    std::unordered_map<usize, PageState, std::hash<usize>, std::equal_to<usize>,
-                       ArenaAllocator<std::pair<const usize, PageState>>>;
-
-using RemoteOffsetsMap =
-    std::unordered_map<usize, u64, std::hash<usize>, std::equal_to<usize>,
-                       ArenaAllocator<std::pair<const usize, u64>>>;
-
 struct alignas(64) Shard {
   std::mutex mutex;
 
   // Lists used to organize the pages mapped in the cache with a LRU policy
-  std::list<Page *> active_pages;
-  std::list<Page *> inactive_pages;
+  ArenaList<Page *> active_pages;
+  ArenaList<Page *> inactive_pages;
 
   // Track the state of pages, both on the cache and on the swap area
-  PageStatesMap page_states;
+  ArenaUnorderedMap<usize, PageState> page_states;
 
-  RemoteOffsetsMap remote_offsets;
+  ArenaUnorderedMap<usize, u64> remote_offsets;
 
   // save the oldest page (back of inactive list).
   // 0 = Empty, UINT64_MAX = Newest.
   // TODO: use this field
-  std::atomic<u64> oldest_age{0};
+  // std::atomic<u64> oldest_age{0};
 
   Shard(Arena *arena)
-      : page_states(ArenaAllocator<std::pair<const usize, PageState>>(arena)),
+      : active_pages(ArenaAllocator<Page *>(arena)),
+        inactive_pages(ArenaAllocator<Page *>(arena)),
+        page_states(ArenaAllocator<std::pair<const usize, PageState>>(arena)),
         remote_offsets(ArenaAllocator<std::pair<const usize, u64>>(arena)) {}
 
   PageState get_page_state(uptr vaddr);
@@ -205,7 +199,9 @@ private:
   // is located in the physical cache
   std::unique_ptr<Page[]> pages_;
   // Unmapped pages in the cache
-  moodycamel::ConcurrentQueue<Page *> free_pages_queue_;
+  // moodycamel::ConcurrentQueue<Page *> free_pages_queue_;
+  std::queue<Page *, std::list<Page *, ArenaAllocator<Page *>>>
+      free_pages_queue_;
 
   // 512MB for metadata allows tracking ~32GB of RAM,
   // assuming 16 bytes overhead per 4KB page
@@ -215,7 +211,7 @@ private:
   // Contiguous array of shards whose allocation must be manually managed
   Shard *shards_;
 
-  // TODO: Use an more appropriate way of handling remote offsets.
+  // TODO: Use a more appropriate way of handling remote offsets.
   // Pages that have been swapped out need a remote offset assigned:
   // the easiest approach is simply bumping an offset
   // at the cost of leaking memory.

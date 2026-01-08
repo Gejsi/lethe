@@ -89,3 +89,5 @@ using Milliseconds = std::chrono::milliseconds;
 constexpr const char *bool_to_str(bool b) noexcept;
 
 void sleep_ms(usize ms);
+
+std::string human_readable_bytes(u64 bytes);

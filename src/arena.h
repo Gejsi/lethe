@@ -4,11 +4,12 @@
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
-#include <vector>
+#include <list>
+#include <unordered_map>
 
 #include "types.h"
 
-// A simple bump pointer allocator
+// Thread-safe static arena implemented with a simple bump allocator
 class Arena {
   u8 *storage_; // Owns the memory
   uptr start_;
@@ -92,3 +93,11 @@ template <typename T> struct ArenaAllocator {
     return a.arena_ != b.arena_;
   }
 };
+
+template <typename T> using ArenaList = std::list<T, ArenaAllocator<T>>;
+
+template <typename Key, typename T, typename Hash = std::hash<Key>,
+          typename Eq = std::equal_to<Key>>
+using ArenaUnorderedMap =
+    std::unordered_map<Key, T, Hash, Eq,
+                       ArenaAllocator<std::pair<const Key, T>>>;

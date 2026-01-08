@@ -23,8 +23,8 @@ void handle_fault(void *fault_addr, regstate_t *regstate) {
     PANIC("Swapper not setup");
   }
 
-  printf("CALLING FAULT HANDLER at %p. Error code: %lu\n", fault_addr,
-         regstate->error_code);
+  // printf("CALLING FAULT HANDLER at %p. Error code: %lu\n", fault_addr,
+  //        regstate->error_code);
 
   // uptr gva = ALIGN_DOWN((uptr)fault_addr);
   // mapper_t::double_map(gva, gva, PAGE_SIZE);
@@ -34,11 +34,17 @@ void handle_fault(void *fault_addr, regstate_t *regstate) {
 
   g_swapper->handle_fault(fault_addr, regstate);
 
-  printf("Resolved\n");
+  // printf("Resolved\n");
 }
 
 void virtual_main(void *any) {
   DEBUG("--- Inside VM ---");
+
+  usize infinite_size = ALIGN_DOWN(UINT64_MAX);
+  auto seg = new segment_t(infinite_size, 0);
+  mapper_t::assign_handler(seg, handle_fault);
+  INFO("Fault handling segment registered: [0x%lx, 0x%lx)", (uptr)seg->start,
+       (uptr)seg->start + seg->size);
 
   g_alloc_hook = [](u64 addr, u64 len, u64 pte) {
     std::string flags;
@@ -51,44 +57,36 @@ void virtual_main(void *any) {
     if (pte & PTE_XD)
       flags += "X";
 
-    INFO("Intercepted alloc: 0x%lx (len: %lu, flags: %s [0x%lx])", addr, len,
-         flags.c_str(), pte);
+    // INFO("Intercepted alloc: 0x%lx (len: %s, flags: %s [0x%lx])", addr,
+    //      human_readable_bytes(len).c_str(), flags.c_str(), pte);
     // g_swapper->handle_alloc(addr, len);
   };
 
   g_dealloc_hook = [](u64 addr, u64 len) {
-    INFO("Intercepted deallocation: 0x%lx (len: %lu)", addr, len);
+    // INFO("Intercepted deallocation: 0x%lx (len: %s)", addr,
+    //      human_readable_bytes(len).c_str());
     // g_swapper->handle_alloc(addr, len);
   };
 
-  s_benchmark_config_t *bench_config = (s_benchmark_config_t *)any;
-  UNUSED(bench_config);
-
-  usize infinite_size = ALIGN_DOWN(UINT64_MAX);
-  auto seg = new segment_t(infinite_size, 0);
-  mapper_t::assign_handler(seg, handle_fault);
-  INFO("Fault handling segment registered: [0x%lx, 0x%lx)", (uptr)seg->start,
-       (uptr)seg->start + seg->size);
-
   g_swapper->start_background_rebalancing();
 
-  // x < 28        no fault
-  // 28 <= x < 128 brk triggered
-  // x >= 128      mmap triggered
-  int *ptr = (int *)malloc(140 * MB);
+  /*
+  //       x <= 100 no fault
+  // 100 < x < 128  brk triggered
+  //       x >= 128 mmap triggered
+  int *ptr = (int *)malloc(110 * MB);
   if (ptr) {
     *ptr = 69;
     printf("Read %d\n", *ptr);
   }
   // free(ptr);
 
-  int *ptr2 = (int *)malloc(260 * MB);
+  int *ptr2 = (int *)malloc(50 * MB);
   if (ptr2) {
     *ptr2 = 420;
     printf("Second read %d\n", *ptr2);
   }
 
-  /*
   void *start_brk = sbrk(0);
   // grow
   sbrk(10 * PAGE_SIZE);
@@ -97,6 +95,11 @@ void virtual_main(void *any) {
   sbrk(-(5 * (iptr)PAGE_SIZE));
   printf("Shrunk Heap via sbrk.\n");
   */
+
+  s_benchmark_config_t *bench_config = (s_benchmark_config_t *)any;
+  StdMap data_layer;
+  // BumpMapDataLayer data_layer(HEAP_START, g_swapper->config.heap_size);
+  run_benchmark(bench_config, &data_layer);
 
   g_swapper->print_stats();
 
