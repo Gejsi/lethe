@@ -68,6 +68,9 @@ void virtual_main(void *any) {
     // g_swapper->handle_alloc(addr, len);
   };
 
+  // std::thread t1([]() { ERROR("Foo"); });
+  // t1.join();
+
   g_swapper->start_background_rebalancing();
 
   /*
@@ -98,7 +101,7 @@ void virtual_main(void *any) {
 
   s_benchmark_config_t *bench_config = (s_benchmark_config_t *)any;
   StdMap data_layer;
-  // BumpMapDataLayer data_layer(HEAP_START, g_swapper->config.heap_size);
+  BumpMapDataLayer data_layer2(HEAP_START, g_swapper->config.heap_size);
   run_benchmark(bench_config, &data_layer);
 
   g_swapper->print_stats();

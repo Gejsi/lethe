@@ -3,7 +3,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
-#include <queue>
 #include <volimem/idt.h>
 
 #include "arena.h"
@@ -18,8 +17,8 @@ constexpr uptr HEAP_START = 0xffff800000000000;
 
 struct SwapperConfig {
   usize cache_size = 128 * MB;
-  usize num_shards = 1;
-  bool rebalancer_disabled = true;
+  usize num_shards = 16;
+  bool rebalancer_disabled = false;
 
   usize num_pages;
   usize heap_size;
@@ -151,6 +150,28 @@ struct SwapperStats {
   std::atomic<usize> rebalancer_skips = 0;
 };
 
+struct ArenaQueueTraits : moodycamel::ConcurrentQueueDefaultTraits {
+  static Arena *arena;
+
+  static inline void *malloc(usize size) {
+    if (!arena) {
+      PANIC("Concurrent queue must use an arena allocator");
+    }
+
+    constexpr usize alignment = alignof(std::max_align_t);
+    uptr ptr = arena->allocate(size, alignment);
+    if (ptr == 0) {
+      return nullptr;
+    }
+
+    return reinterpret_cast<void *>(ptr);
+  }
+
+  static inline void free(void *) {
+    // no-op
+  }
+};
+
 class Swapper {
 public:
   Swapper(SwapperConfig &&swapper_config, std::unique_ptr<Storage> storage);
@@ -198,14 +219,16 @@ private:
   // Fixed-size array describing where a faulting address
   // is located in the physical cache
   std::unique_ptr<Page[]> pages_;
-  // Unmapped pages in the cache
-  // moodycamel::ConcurrentQueue<Page *> free_pages_queue_;
-  std::queue<Page *, std::list<Page *, ArenaAllocator<Page *>>>
-      free_pages_queue_;
 
   // 512MB for metadata allows tracking ~32GB of RAM,
   // assuming 16 bytes overhead per 4KB page
   Arena metadata_arena_;
+
+  std::unique_ptr<moodycamel::ConcurrentQueue<Page *, ArenaQueueTraits>>
+      free_pages_queue_;
+
+  // std::queue<Page *, std::list<Page *, ArenaAllocator<Page *>>>
+  //     free_pages_queue_;
 
   // std::unique_ptr<Shard[]> shards_;
   // Contiguous array of shards whose allocation must be manually managed

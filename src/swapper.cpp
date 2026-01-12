@@ -8,6 +8,8 @@
 #include "swapper.h"
 #include "utils.h"
 
+Arena *ArenaQueueTraits::arena = nullptr;
+
 constexpr bool pte_is_present(u64 pte) { return pte & PTE_P; }
 constexpr bool pte_is_writable(u64 pte) { return pte & PTE_W; }
 constexpr bool pte_is_accessed(u64 pte) { return pte & PTE_A; }
@@ -60,8 +62,6 @@ Swapper::Swapper(SwapperConfig &&swapper_config,
                  std::unique_ptr<Storage> storage)
     : config(std::move(swapper_config)), storage_(std::move(storage)),
       pages_(std::make_unique<Page[]>(config.num_pages)),
-      free_pages_queue_(std::list<Page *, ArenaAllocator<Page *>>(
-          ArenaAllocator<Page *>(&metadata_arena_))),
       metadata_arena_(512 * MB) {
   // AsyncLogger::instance().init("swapper.log");
 
@@ -71,14 +71,19 @@ Swapper::Swapper(SwapperConfig &&swapper_config,
         "Swapper initialized with a storage backend that has no cache address");
   }
 
+  ArenaQueueTraits::arena = &metadata_arena_;
+  free_pages_queue_ =
+      std::make_unique<moodycamel::ConcurrentQueue<Page *, ArenaQueueTraits>>();
+
   for (usize i = 0; i < config.num_pages; i++) {
-    // free_pages_queue_.enqueue(&pages_[i]);
-    free_pages_queue_.push(&pages_[i]);
+    free_pages_queue_->enqueue(&pages_[i]);
+    // free_pages_queue_.push(&pages_[i]);
   }
 
   // manually allocate memory to hold the shards
   shards_ = static_cast<Shard *>(operator new[](
       sizeof(Shard) * config.num_shards, std::align_val_t{alignof(Shard)}));
+
   // placement-new each shard
   for (usize i = 0; i < config.num_shards; ++i) {
     new (&shards_[i]) Shard(&metadata_arena_);
@@ -174,14 +179,14 @@ usize Swapper::get_shard_idx(uptr vaddr) {
 Page *Swapper::acquire_page(Shard &shard) {
   Page *victim_page = nullptr;
 
-  // if (free_pages_queue_.try_dequeue(victim_page)) {
-  //   return victim_page;
-  // }
-  if (!free_pages_queue_.empty()) {
-    victim_page = free_pages_queue_.front();
-    free_pages_queue_.pop();
+  if (free_pages_queue_->try_dequeue(victim_page)) {
     return victim_page;
   }
+  // if (!free_pages_queue_.empty()) {
+  //   victim_page = free_pages_queue_.front();
+  //   free_pages_queue_.pop();
+  //   return victim_page;
+  // }
 
   // no free page found, eviction is necessary
   if (!shard.inactive_pages.empty()) {
@@ -390,13 +395,13 @@ void Swapper::promote_hot_pages(Shard &shard) {
 }
 
 void Swapper::reap_cold_pages(Shard &shard) {
-  // if (free_pages_queue_.size_approx() >= config.reap_reserve) {
-  //   return;
-  // }
-
-  if (free_pages_queue_.size() >= config.reap_reserve) {
+  if (free_pages_queue_->size_approx() >= config.reap_reserve) {
     return;
   }
+
+  // if (free_pages_queue_.size() >= config.reap_reserve) {
+  //   return;
+  // }
 
   usize evictions = 0;
 
@@ -407,8 +412,8 @@ void Swapper::reap_cold_pages(Shard &shard) {
     shard.inactive_pages.pop_back();
 
     swap_out_page(victim_page);
-    // free_pages_queue_.enqueue(victim_page);
-    free_pages_queue_.push(victim_page);
+    free_pages_queue_->enqueue(victim_page);
+    // free_pages_queue_.push(victim_page);
 
     evictions++;
     stats_.proactive_evictions++;
