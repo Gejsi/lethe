@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <list>
 #include <unordered_map>
+#include <vector>
 
 #include "types.h"
 
@@ -95,6 +96,11 @@ template <typename T> struct ArenaAllocator {
 };
 
 template <typename T> using ArenaList = std::list<T, ArenaAllocator<T>>;
+
+template <typename T> using ArenaVec = std::vector<T, ArenaAllocator<T>>;
+
+using ArenaString =
+    std::basic_string<char, std::char_traits<char>, ArenaAllocator<char>>;
 
 template <typename Key, typename T, typename Hash = std::hash<Key>,
           typename Eq = std::equal_to<Key>>

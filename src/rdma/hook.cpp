@@ -2,17 +2,32 @@
 #include <dlfcn.h>
 #include <unistd.h>
 #include <volimem/mapper.h>
+#include <volimem/syscall_table.h>
 #include <volimem/vcpu.h>
 #include <volimem/volimem.h>
 
 #include "common_client.h"
 #include "storage/rdma_storage.h"
+#include "utils.h"
 
 typedef int (*__libc_start_main_t)(int (*main)(int, char **, char **), int argc,
                                    char **argv,
                                    int (*init)(int, char **, char **),
                                    void (*fini)(), void (*rtld_fini)(),
                                    void *stack_end);
+
+// Hold all the arguments needed to call the original
+// __libc_start_main from inside the VM.
+struct libc_start_params {
+  __libc_start_main_t __libc_start_main;
+  int (*main)(int, char **, char **);
+  int argc;
+  char **argv;
+  int (*init)(int, char **, char **);
+  void (*fini)();
+  void (*rtld_fini)();
+  void *stack_end;
+};
 
 static int (*real_main)(int, char **, char **);
 
@@ -28,40 +43,37 @@ static int call_real_main(int argc, char **argv, char **env) {
   return ret;
 }
 
-// Hold all the arguments needed to call the original
-// __libc_start_main from inside the VM.
-struct libc_start_params {
-  __libc_start_main_t __libc_start_main;
-  int (*main)(int, char **, char **);
-  int argc;
-  char **argv;
-  int (*init)(int, char **, char **);
-  void (*fini)();
-  void (*rtld_fini)();
-  void *stack_end;
-};
-
 void handle_fault(void *fault_addr, regstate_t *regstate) {
   if (!g_swapper) {
     PANIC("Swapper not setup");
   }
 
+  static usize counter = 0;
+
+  // printf("CALLING FAULT HANDLER at %p. Error code: %lu\n", fault_addr,
+  //        regstate->error_code);
+
   g_swapper->handle_fault(fault_addr, regstate);
+
+  // printf("Resolved %lu\n", counter++);
 }
 
 static void virtual_main(void *any) {
+  DEBUG("--- Inside VM ---");
+
   struct libc_start_params *params = (struct libc_start_params *)any;
 
-  DEBUG("--- Inside VM ---");
-  DEBUG("Running on the vCPU apic %lu", local_vcpu->lapic_id);
-  DEBUG("Root page table is at %p", (void *)mapper_t::get_root());
-
-  auto seg = new segment_t(g_swapper->config.heap_size, HEAP_START);
+  usize infinite_size = ALIGN_DOWN(UINT64_MAX);
+  auto seg = new segment_t(infinite_size, 0);
   mapper_t::assign_handler(seg, handle_fault);
-  INFO("Fault handling segment registered: [0x%lx, 0x%lx)", HEAP_START,
-       (uptr)HEAP_START + g_swapper->config.heap_size);
+  INFO("Fault handling segment registered: [0x%lx, 0x%lx)", (uptr)seg->start,
+       (uptr)seg->start + seg->size);
 
-  // g_swapper->launch_background_rebalancing();
+  g_alloc_hook = [](u64, u64, u64) {};
+  g_dealloc_hook = [](u64, u64) {};
+
+  // std::thread t1([]() { ERROR("Foo"); });
+  // t1.join();
 
   params->__libc_start_main(params->main, params->argc, params->argv,
                             params->init, params->fini, params->rtld_fini,
@@ -117,6 +129,8 @@ extern "C" int __libc_start_main(int (*main)(int, char **, char **), int argc,
                                                       IBV_ACCESS_REMOTE_WRITE));
   if (!cache_area) {
     PANIC("Failed to allocate and register the cache");
+  } else {
+    INFO("Cache area allocated at %p", (void *)cache_area);
   }
 
   auto rdma_storage = std::make_unique<RDMAStorage>(
@@ -149,8 +163,8 @@ extern "C" int __libc_start_main(int (*main)(int, char **, char **), int argc,
   // raise(SIGTRAP);
   ret = volimem_start(&param, virtual_main);
 
-  UNREACHABLE("PID %d: volimem_start shouldn't return (ret = %d)", getpid(),
-              ret);
+  UNREACHABLE("PID %d: volimem_start shouldn't return here (ret = %d)",
+              getpid(), ret);
 
   return ret;
 }

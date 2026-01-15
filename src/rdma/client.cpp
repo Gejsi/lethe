@@ -59,13 +59,11 @@ void virtual_main(void *any) {
 
     // INFO("Intercepted alloc: 0x%lx (len: %s, flags: %s [0x%lx])", addr,
     //      human_readable_bytes(len).c_str(), flags.c_str(), pte);
-    // g_swapper->handle_alloc(addr, len);
   };
 
   g_dealloc_hook = [](u64 addr, u64 len) {
     // INFO("Intercepted deallocation: 0x%lx (len: %s)", addr,
     //      human_readable_bytes(len).c_str());
-    // g_swapper->handle_alloc(addr, len);
   };
 
   // std::thread t1([]() { ERROR("Foo"); });
@@ -79,14 +77,14 @@ void virtual_main(void *any) {
   //       x >= 128 mmap triggered
   int *ptr = (int *)malloc(110 * MB);
   if (ptr) {
-    *ptr = 69;
+    *ptr = 65;
     printf("Read %d\n", *ptr);
   }
   // free(ptr);
 
   int *ptr2 = (int *)malloc(50 * MB);
   if (ptr2) {
-    *ptr2 = 420;
+    *ptr2 = 450;
     printf("Second read %d\n", *ptr2);
   }
 

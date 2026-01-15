@@ -35,9 +35,13 @@ int main(int argc, char **argv) {
                                     .hook = NULL,
                                     .args = NULL};
 
-  BumpMapDataLayer data_layer(HEAP_START, 0);
+  // BumpMapDataLayer data_layer(HEAP_START, 0);
+  StdMap data_layer;
+  // BumpMapDataLayer data_layer2(HEAP_START, g_swapper->config.heap_size);
   run_benchmark(&bench_config, &data_layer);
-  // data_layer.insert(69, 420);
-  // printf("Hello! %lu\n", data_layer.get(69));
-  // printf("Bu! %lu\n", data_layer.dummy());
+  // int *ptr = (int *)malloc(110 * MB);
+  // if (ptr) {
+  //   *ptr = 65;
+  //   printf("Read %d\n", *ptr);
+  // }
 }

@@ -29,6 +29,7 @@ void clear_permissions(uptr vaddr, u64 flags) {
 // Map a virtual page to a physical page
 void map_gva(uptr gva, uptr gpa) {
   mapper_t::map_gpt(gva, gpa, PAGE_SIZE, PTE_P | PTE_W);
+  // mapper_t::double_map(gva, gva, PAGE_SIZE);
 }
 
 // Unmap a page from the guest page table

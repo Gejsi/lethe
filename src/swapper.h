@@ -17,8 +17,8 @@ constexpr uptr HEAP_START = 0xffff800000000000;
 
 struct SwapperConfig {
   usize cache_size = 128 * MB;
-  usize num_shards = 16;
-  bool rebalancer_disabled = false;
+  usize num_shards = 1;
+  bool rebalancer_disabled = true;
 
   usize num_pages;
   usize heap_size;
@@ -139,11 +139,9 @@ struct SwapperStats {
   std::atomic<usize> skipped_writes = 0;
   // evictions of FreshlyMapped clean pages
   std::atomic<usize> discards = 0;
-  // evictions that happened because
-  // no free slot was find in the cache
+  // evictions that happened because no free slot was find in the cache
   std::atomic<usize> reactive_evictions = 0;
-  // evictions that happened because
-  // of the background reaper
+  // evictions that happened because of the background reaper
   std::atomic<usize> proactive_evictions = 0;
   std::atomic<usize> promotions = 0;
   std::atomic<usize> demotions = 0;
@@ -182,6 +180,7 @@ public:
 
   void handle_alloc(u64 vaddr, u64 len);
   void handle_dealloc(u64 vaddr, u64 len);
+  void handle_protect(u64 vaddr, u64 len, u64 flags);
 
   // Starts the LRU-rebalancing background thread
   void start_background_rebalancing();
