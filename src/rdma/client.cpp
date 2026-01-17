@@ -18,6 +18,11 @@
 
 void *temp_page;
 
+struct VirtualMainContext {
+  SwapperConfig swapper_config;
+  s_benchmark_config_t *bench_config;
+};
+
 void handle_fault(void *fault_addr, regstate_t *regstate) {
   if (!g_swapper) {
     PANIC("Swapper not setup");
@@ -39,6 +44,29 @@ void handle_fault(void *fault_addr, regstate_t *regstate) {
 
 void virtual_main(void *any) {
   DEBUG("--- Inside VM ---");
+
+  auto *ctx = static_cast<VirtualMainContext *>(any);
+  auto &swapper_config = ctx->swapper_config;
+  s_benchmark_config_t *bench_config = ctx->bench_config;
+
+  // The cache where RDMA operations source and sink
+  cache_area =
+      rdma_buffer_alloc(pd, PAGE_SIZE, swapper_config.cache_size,
+                        static_cast<ibv_access_flags>(IBV_ACCESS_LOCAL_WRITE |
+                                                      IBV_ACCESS_REMOTE_READ |
+                                                      IBV_ACCESS_REMOTE_WRITE));
+  if (!cache_area) {
+    PANIC("Failed to allocate and register the cache");
+  } else {
+    INFO("Cache area allocated at %p", (void *)cache_area);
+  }
+
+  auto rdma_storage = std::make_unique<RDMAStorage>(
+      client_qp, io_completion_channel, cache_area, swap_area_metadata);
+
+  auto swapper = std::make_unique<Swapper>(std::move(swapper_config),
+                                           std::move(rdma_storage));
+  g_swapper = swapper.get();
 
   usize infinite_size = ALIGN_DOWN(UINT64_MAX);
   auto seg = new segment_t(infinite_size, 0);
@@ -69,7 +97,7 @@ void virtual_main(void *any) {
   // std::thread t1([]() { ERROR("Foo"); });
   // t1.join();
 
-  g_swapper->start_background_rebalancing();
+  swapper->start_background_rebalancing();
 
   /*
   //       x <= 100 no fault
@@ -97,14 +125,13 @@ void virtual_main(void *any) {
   printf("Shrunk Heap via sbrk.\n");
   */
 
-  s_benchmark_config_t *bench_config = (s_benchmark_config_t *)any;
   StdMap data_layer;
-  BumpMapDataLayer data_layer2(HEAP_START, g_swapper->config.heap_size);
+  BumpMapDataLayer data_layer2(HEAP_START, swapper_config.heap_size);
   run_benchmark(bench_config, &data_layer);
 
-  g_swapper->print_stats();
+  swapper->print_stats();
 
-  g_swapper->stop_background_rebalancing();
+  swapper->stop_background_rebalancing();
 
   DEBUG("--- Exiting VM ---");
 }
@@ -229,34 +256,18 @@ int main(int argc, char **argv) {
     return ret;
   }
 
-  /* The cache where RDMA operations source and sink */
-  cache_area =
-      rdma_buffer_alloc(pd, PAGE_SIZE, swapper_config.cache_size,
-                        static_cast<ibv_access_flags>(IBV_ACCESS_LOCAL_WRITE |
-                                                      IBV_ACCESS_REMOTE_READ |
-                                                      IBV_ACCESS_REMOTE_WRITE));
-  if (!cache_area) {
-    PANIC("Failed to allocate and register the cache");
-  } else {
-    INFO("Cache area allocated at %p", (void *)cache_area);
-  }
+  constexpr s_volimem_config_t voli_config{
+      .log_level = INFO,
+      .host_page_type = VOLIMEM_NORMAL_PAGES,
+      .guest_page_type = VOLIMEM_NORMAL_PAGES,
+      .print_kvm_stats = false};
+  volimem_set_config(&voli_config);
 
-  {
-    auto rdma_storage = std::make_unique<RDMAStorage>(
-        client_qp, io_completion_channel, cache_area, swap_area_metadata);
-
-    auto swapper = std::make_unique<Swapper>(std::move(swapper_config),
-                                             std::move(rdma_storage));
-    g_swapper = swapper.get();
-
-    constexpr s_volimem_config_t voli_config{
-        .log_level = INFO,
-        .host_page_type = VOLIMEM_NORMAL_PAGES,
-        .guest_page_type = VOLIMEM_NORMAL_PAGES,
-        .print_kvm_stats = false};
-    volimem_set_config(&voli_config);
-    volimem_start(&bench_config, virtual_main);
-  }
+  VirtualMainContext vm_ctx{
+      .swapper_config = std::move(swapper_config),
+      .bench_config = &bench_config,
+  };
+  volimem_start(&vm_ctx, virtual_main);
 
   ret = disconnect_and_cleanup();
   if (ret) {

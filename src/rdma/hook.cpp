@@ -43,6 +43,11 @@ static int call_real_main(int argc, char **argv, char **env) {
   return ret;
 }
 
+struct VirtualMainContext {
+  SwapperConfig swapper_config;
+  struct libc_start_params *libc_params;
+};
+
 void handle_fault(void *fault_addr, regstate_t *regstate) {
   if (!g_swapper) {
     PANIC("Swapper not setup");
@@ -61,7 +66,27 @@ void handle_fault(void *fault_addr, regstate_t *regstate) {
 static void virtual_main(void *any) {
   DEBUG("--- Inside VM ---");
 
-  struct libc_start_params *params = (struct libc_start_params *)any;
+  auto *ctx = static_cast<VirtualMainContext *>(any);
+  auto &swapper_config = ctx->swapper_config;
+  libc_start_params *params = ctx->libc_params;
+
+  // The cache where RDMA operations source and sink
+  cache_area =
+      rdma_buffer_alloc(pd, PAGE_SIZE, swapper_config.cache_size,
+                        static_cast<ibv_access_flags>(IBV_ACCESS_LOCAL_WRITE |
+                                                      IBV_ACCESS_REMOTE_READ |
+                                                      IBV_ACCESS_REMOTE_WRITE));
+  if (!cache_area) {
+    PANIC("Failed to allocate and register the cache");
+  } else {
+    INFO("Cache area allocated at %p", (void *)cache_area);
+  }
+
+  auto rdma_storage = std::make_unique<RDMAStorage>(
+      client_qp, io_completion_channel, cache_area, swap_area_metadata);
+  auto swapper = std::make_unique<Swapper>(std::move(swapper_config),
+                                           std::move(rdma_storage));
+  g_swapper = swapper.get();
 
   usize infinite_size = ALIGN_DOWN(UINT64_MAX);
   auto seg = new segment_t(infinite_size, 0);
@@ -88,8 +113,6 @@ extern "C" int __libc_start_main(int (*main)(int, char **, char **), int argc,
                                  int (*init)(int, char **, char **),
                                  void (*fini)(), void (*rtld_fini)(),
                                  void *stack_end) {
-  SwapperConfig swapper_config;
-
   // TODO: make these values configurable
   struct sockaddr_in server_sockaddr;
   memset(&server_sockaddr, 0, sizeof(server_sockaddr));
@@ -121,35 +144,17 @@ extern "C" int __libc_start_main(int (*main)(int, char **, char **), int argc,
     return ret;
   }
 
-  /* The cache where RDMA operations source and sink */
-  cache_area =
-      rdma_buffer_alloc(pd, PAGE_SIZE, swapper_config.cache_size,
-                        static_cast<ibv_access_flags>(IBV_ACCESS_LOCAL_WRITE |
-                                                      IBV_ACCESS_REMOTE_READ |
-                                                      IBV_ACCESS_REMOTE_WRITE));
-  if (!cache_area) {
-    PANIC("Failed to allocate and register the cache");
-  } else {
-    INFO("Cache area allocated at %p", (void *)cache_area);
-  }
-
-  auto rdma_storage = std::make_unique<RDMAStorage>(
-      client_qp, io_completion_channel, cache_area, swap_area_metadata);
-  auto swapper = std::make_unique<Swapper>(std::move(swapper_config),
-                                           std::move(rdma_storage));
-  g_swapper = swapper.get();
-
-  static struct libc_start_params param;
-  param.__libc_start_main =
+  libc_start_params params;
+  params.__libc_start_main =
       (__libc_start_main_t)dlsym(RTLD_NEXT, "__libc_start_main");
   real_main = main;
-  param.main = call_real_main;
-  param.argc = argc;
-  param.argv = argv;
-  param.init = init;
-  param.fini = fini;
-  param.rtld_fini = rtld_fini;
-  param.stack_end = stack_end;
+  params.main = call_real_main;
+  params.argc = argc;
+  params.argv = argv;
+  params.init = init;
+  params.fini = fini;
+  params.rtld_fini = rtld_fini;
+  params.stack_end = stack_end;
 
   constexpr s_volimem_config_t voli_config = {
       .log_level = INFO,
@@ -159,9 +164,14 @@ extern "C" int __libc_start_main(int (*main)(int, char **, char **), int argc,
   volimem_set_config(&voli_config);
   INFO("PID %d: Swapper started", getpid());
 
+  SwapperConfig swapper_config;
+  VirtualMainContext vm_ctx{
+      .swapper_config = std::move(swapper_config),
+      .libc_params = &params,
+  };
   // Uncomment to be able to use GDB and avoid "program exited during startup"
   // raise(SIGTRAP);
-  ret = volimem_start(&param, virtual_main);
+  ret = volimem_start(&vm_ctx, virtual_main);
 
   UNREACHABLE("PID %d: volimem_start shouldn't return here (ret = %d)",
               getpid(), ret);

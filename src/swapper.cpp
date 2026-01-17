@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cstdio>
+#include <fcntl.h>
 #include <mutex>
 #include <random>
 #include <volimem/mapper.h>
@@ -28,8 +29,8 @@ void clear_permissions(uptr vaddr, u64 flags) {
 
 // Map a virtual page to a physical page
 void map_gva(uptr gva, uptr gpa) {
-  mapper_t::map_gpt(gva, gpa, PAGE_SIZE, PTE_P | PTE_W);
-  // mapper_t::double_map(gva, gva, PAGE_SIZE);
+  // mapper_t::map_gpt(gva, gpa, PAGE_SIZE, PTE_P | PTE_W);
+  mapper_t::double_map(gva, gva, PAGE_SIZE);
 }
 
 // Unmap a page from the guest page table
@@ -94,6 +95,10 @@ Swapper::Swapper(SwapperConfig &&swapper_config,
   //   page_states_[i].store(PageState::Unmapped, std::memory_order_relaxed);
   // }
 
+  mem_fd_ = open("/proc/self/mem", O_RDONLY);
+  if (mem_fd_ < 0)
+    PANIC("Could not open /proc/self/mem");
+
   INFO("Swapper initialized with %zu cache slots and %zu shards to handle them",
        config.num_pages, config.num_shards);
 }
@@ -106,63 +111,6 @@ Swapper::~Swapper() {
   operator delete[](shards_, std::align_val_t{alignof(Shard)});
 
   DEBUG("Destroyed Swapper");
-}
-
-void Swapper::start_background_rebalancing() {
-  if (config.rebalancer_disabled) {
-    return;
-  }
-
-  rebalancer_ = std::thread([this]() {
-    std::vector<usize> shard_indices(config.num_shards);
-    for (usize i = 0; i < config.num_shards; ++i) {
-      shard_indices[i] = i;
-    }
-
-    std::random_device rd;
-    std::default_random_engine rng(rd());
-
-    while (rebalancer_running_.load()) {
-      sleep_ms(rebalance_interval_ms_);
-
-      // Shuffle the order of shards to rebalance
-      std::shuffle(shard_indices.begin(), shard_indices.end(), rng);
-
-      for (usize shard_idx : shard_indices) {
-        Shard &shard = shards_[shard_idx];
-
-        std::unique_lock<std::mutex> lock(shard.mutex, std::try_to_lock);
-
-        if (lock.owns_lock()) {
-          // Rebalance lists
-          demote_cold_pages(shard);
-          promote_hot_pages(shard);
-          reap_cold_pages(shard);
-        } else {
-          stats_.rebalancer_skips++;
-        }
-
-        if (!rebalancer_running_.load()) {
-          return;
-        }
-      }
-
-      // Adapt the interval at which this thread runs
-      adapt_rebalance_interval();
-    }
-  });
-}
-
-void Swapper::stop_background_rebalancing() {
-  if (config.rebalancer_disabled) {
-    return;
-  }
-
-  rebalancer_running_ = false;
-
-  if (rebalancer_.joinable()) {
-    rebalancer_.join();
-  }
 }
 
 usize Swapper::get_page_idx(Page *page) { return (usize)(page - pages_.get()); }
@@ -228,10 +176,23 @@ void Swapper::swap_in_page(Page *page, uptr fault_vaddr) {
   auto cache_gpa = mapper_t::gva_to_gpa((void *)cache_gva);
 
   if (page_state == PageState::Unmapped) {
-    DEBUG("Assigning page for gva 0x%lx", fault_vaddr);
-    memset((void *)cache_gva, 0, PAGE_SIZE);
-    shard.set_page_state(fault_vaddr, PageState::FreshlyMapped);
+    DEBUG("ASSIGNING page for gva 0x%lx", fault_vaddr);
 
+    // The Kernel might have written data here (via read/recv syscalls).
+    // pread from /proc/self/mem asks the kernel: "Give me the data at
+    // fault_vaddr". If the kernel allocated a page there, we get the data.
+    ssize_t bytes =
+        pread(mem_fd_, (void *)cache_gva, PAGE_SIZE, (off_t)fault_vaddr);
+
+    if (bytes != PAGE_SIZE) {
+      // Kernel has nothing there. Standard Demand Zero.
+      memset((void *)cache_gva, 0, PAGE_SIZE);
+    } else {
+      // Kernel had data! We just copied it into our Cache Page.
+      // We effectively "adopted" the data into our swapper system.
+    }
+
+    shard.set_page_state(fault_vaddr, PageState::FreshlyMapped);
     stats_.demand_zeros++;
   } else if (page_state == PageState::RemotelyMapped) {
     DEBUG("Swapping IN: 0x%lx into cache slot %zu. Cache (gva->gpa): "
@@ -345,6 +306,63 @@ void Swapper::handle_fault(void *fault_addr, regstate_t *regstate) {
   Page *page = acquire_page(shard);
   swap_in_page(page, aligned_fault_vaddr);
   shard.active_pages.push_front(page);
+}
+
+void Swapper::start_background_rebalancing() {
+  if (config.rebalancer_disabled) {
+    return;
+  }
+
+  rebalancer_ = std::thread([this]() {
+    std::vector<usize> shard_indices(config.num_shards);
+    for (usize i = 0; i < config.num_shards; ++i) {
+      shard_indices[i] = i;
+    }
+
+    std::random_device rd;
+    std::default_random_engine rng(rd());
+
+    while (rebalancer_running_.load()) {
+      sleep_ms(rebalance_interval_ms_);
+
+      // Shuffle the order of shards to rebalance
+      std::shuffle(shard_indices.begin(), shard_indices.end(), rng);
+
+      for (usize shard_idx : shard_indices) {
+        Shard &shard = shards_[shard_idx];
+
+        std::unique_lock<std::mutex> lock(shard.mutex, std::try_to_lock);
+
+        if (lock.owns_lock()) {
+          // Rebalance lists
+          demote_cold_pages(shard);
+          promote_hot_pages(shard);
+          reap_cold_pages(shard);
+        } else {
+          stats_.rebalancer_skips++;
+        }
+
+        if (!rebalancer_running_.load()) {
+          return;
+        }
+      }
+
+      // Adapt the interval at which this thread runs
+      adapt_rebalance_interval();
+    }
+  });
+}
+
+void Swapper::stop_background_rebalancing() {
+  if (config.rebalancer_disabled) {
+    return;
+  }
+
+  rebalancer_running_ = false;
+
+  if (rebalancer_.joinable()) {
+    rebalancer_.join();
+  }
 }
 
 void Swapper::demote_cold_pages(Shard &shard) {

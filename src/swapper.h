@@ -239,6 +239,8 @@ private:
   // at the cost of leaking memory.
   std::atomic<u64> next_swap_offset_{0};
 
+  int mem_fd_;
+
   std::thread rebalancer_;
   std::atomic<bool> rebalancer_running_{true};
   // how often the rebalance thread runs, recomputed at runtime
