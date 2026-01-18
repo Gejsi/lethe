@@ -16,7 +16,7 @@ constexpr uptr HEAP_START = 0xffff800000000000;
 // constexpr uptr HEAP_START = 0x0000555500000000UL;
 
 struct SwapperConfig {
-  usize cache_size = 128 * MB;
+  usize cache_size = 16 * MB;
   usize num_shards = 1;
   bool rebalancer_disabled = true;
 
@@ -178,10 +178,6 @@ public:
   // The main entry point called by VoliMem on a page fault
   void handle_fault(void *fault_addr, regstate_t *regstate);
 
-  void handle_alloc(u64 vaddr, u64 len);
-  void handle_dealloc(u64 vaddr, u64 len);
-  void handle_protect(u64 vaddr, u64 len, u64 flags);
-
   // Starts the LRU-rebalancing background thread
   void start_background_rebalancing();
   // Stops the LRU-rebalancing background thread
@@ -215,8 +211,8 @@ private:
 
   std::unique_ptr<Storage> storage_; // The abstract storage backend
   void *cache_base_addr_;            // The base address of the cache
-  // Fixed-size array describing where a faulting address
-  // is located in the physical cache
+  // std::mutex staging_mutex_;
+  // Fixed-size array describing where a page is located in the cache GPA
   std::unique_ptr<Page[]> pages_;
 
   // 512MB for metadata allows tracking ~32GB of RAM,
@@ -225,9 +221,6 @@ private:
 
   std::unique_ptr<moodycamel::ConcurrentQueue<Page *, ArenaQueueTraits>>
       free_pages_queue_;
-
-  // std::queue<Page *, std::list<Page *, ArenaAllocator<Page *>>>
-  //     free_pages_queue_;
 
   // std::unique_ptr<Shard[]> shards_;
   // Contiguous array of shards whose allocation must be manually managed
@@ -238,8 +231,6 @@ private:
   // the easiest approach is simply bumping an offset
   // at the cost of leaking memory.
   std::atomic<u64> next_swap_offset_{0};
-
-  int mem_fd_;
 
   std::thread rebalancer_;
   std::atomic<bool> rebalancer_running_{true};

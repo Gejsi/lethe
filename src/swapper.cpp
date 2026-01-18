@@ -3,6 +3,7 @@
 #include <fcntl.h>
 #include <mutex>
 #include <random>
+#include <sys/mman.h>
 #include <volimem/mapper.h>
 
 #define USE_ASYNC_LOGGER
@@ -29,8 +30,8 @@ void clear_permissions(uptr vaddr, u64 flags) {
 
 // Map a virtual page to a physical page
 void map_gva(uptr gva, uptr gpa) {
-  // mapper_t::map_gpt(gva, gpa, PAGE_SIZE, PTE_P | PTE_W);
-  mapper_t::double_map(gva, gva, PAGE_SIZE);
+  mapper_t::map_gpt(gva, gpa, PAGE_SIZE, PTE_P | PTE_W);
+  // mapper_t::double_map(gva, gva, PAGE_SIZE);
 }
 
 // Unmap a page from the guest page table
@@ -79,7 +80,6 @@ Swapper::Swapper(SwapperConfig &&swapper_config,
 
   for (usize i = 0; i < config.num_pages; i++) {
     free_pages_queue_->enqueue(&pages_[i]);
-    // free_pages_queue_.push(&pages_[i]);
   }
 
   // manually allocate memory to hold the shards
@@ -90,14 +90,6 @@ Swapper::Swapper(SwapperConfig &&swapper_config,
   for (usize i = 0; i < config.num_shards; ++i) {
     new (&shards_[i]) Shard(&metadata_arena_);
   }
-
-  // for (usize i = 0; i < config.num_heap_pages; ++i) {
-  //   page_states_[i].store(PageState::Unmapped, std::memory_order_relaxed);
-  // }
-
-  mem_fd_ = open("/proc/self/mem", O_RDONLY);
-  if (mem_fd_ < 0)
-    PANIC("Could not open /proc/self/mem");
 
   INFO("Swapper initialized with %zu cache slots and %zu shards to handle them",
        config.num_pages, config.num_shards);
@@ -131,11 +123,6 @@ Page *Swapper::acquire_page(Shard &shard) {
   if (free_pages_queue_->try_dequeue(victim_page)) {
     return victim_page;
   }
-  // if (!free_pages_queue_.empty()) {
-  //   victim_page = free_pages_queue_.front();
-  //   free_pages_queue_.pop();
-  //   return victim_page;
-  // }
 
   // no free page found, eviction is necessary
   if (!shard.inactive_pages.empty()) {
@@ -172,32 +159,34 @@ void Swapper::swap_in_page(Page *page, uptr fault_vaddr) {
   //         .first->second;
   PageState page_state = shard.get_page_state(fault_vaddr);
 
+  // std::lock_guard<std::mutex> buffer_lock(staging_mutex_);
+
   auto cache_gva = get_cache_gva(page);
   auto cache_gpa = mapper_t::gva_to_gpa((void *)cache_gva);
 
+  u8 vec = 0;
+  if (mincore((void *)fault_vaddr, PAGE_SIZE, &vec) == 0 && (vec & 1)) {
+    DEBUG("Kernel-allocated page detected at 0x%lx", fault_vaddr);
+
+    mapper_t::double_map(fault_vaddr, fault_vaddr, PAGE_SIZE);
+    shard.set_page_state(fault_vaddr, PageState::FreshlyMapped);
+
+    stats_.demand_zeros++;
+
+    page->vaddr = fault_vaddr;
+    return;
+  }
+
   if (page_state == PageState::Unmapped) {
-    DEBUG("ASSIGNING page for gva 0x%lx", fault_vaddr);
-
-    // The Kernel might have written data here (via read/recv syscalls).
-    // pread from /proc/self/mem asks the kernel: "Give me the data at
-    // fault_vaddr". If the kernel allocated a page there, we get the data.
-    ssize_t bytes =
-        pread(mem_fd_, (void *)cache_gva, PAGE_SIZE, (off_t)fault_vaddr);
-
-    if (bytes != PAGE_SIZE) {
-      // Kernel has nothing there. Standard Demand Zero.
-      memset((void *)cache_gva, 0, PAGE_SIZE);
-    } else {
-      // Kernel had data! We just copied it into our Cache Page.
-      // We effectively "adopted" the data into our swapper system.
-    }
-
+    DEBUG("Assigning page for gva 0x%lx", fault_vaddr);
+    map_gva(fault_vaddr, cache_gpa);
+    memset((void *)fault_vaddr, 0, PAGE_SIZE);
     shard.set_page_state(fault_vaddr, PageState::FreshlyMapped);
     stats_.demand_zeros++;
   } else if (page_state == PageState::RemotelyMapped) {
     DEBUG("Swapping IN: 0x%lx into cache slot %zu. Cache (gva->gpa): "
           "0x%lx->0x%lx",
-          fault_vaddr, get_page_idx(page), cache_gva, cache_gpa);
+          fault_vaddr, 0, 0, 0);
 
     // auto target_offset = fault_vaddr - HEAP_START;
     auto target_offset = shard.remote_offsets[vaddr_to_vpn(fault_vaddr)];
@@ -205,6 +194,12 @@ void Swapper::swap_in_page(Page *page, uptr fault_vaddr) {
     if (ret != 0) {
       PANIC("Failed to swap in: backend read failed (%d)", ret);
     }
+
+    map_gva(fault_vaddr, cache_gpa);
+
+    // Copy Staging -> Fault Address
+    // This 'memcpy' forces the OS to allocate a physical page and populate it.
+    memcpy((void *)fault_vaddr, (void *)cache_gva, PAGE_SIZE);
 
     shard.set_page_state(fault_vaddr, PageState::Mapped);
 
@@ -215,7 +210,6 @@ void Swapper::swap_in_page(Page *page, uptr fault_vaddr) {
         page_state_to_str(page_state), fault_vaddr);
   }
 
-  map_gva(fault_vaddr, cache_gpa);
   page->vaddr = fault_vaddr;
 }
 
@@ -228,55 +222,58 @@ void Swapper::swap_out_page(Page *page) {
   auto perms = mapper_t::get_protect(victim_vaddr);
   bool is_dirty = pte_is_dirty(perms);
 
-  unmap_gva(victim_vaddr);
+  // clear_permissions(victim_vaddr, PTE_P | PTE_W | PTE_A);
 
   if (is_dirty) {
-    // dirty page: write to storage
-    // auto victim_offset = victim_vaddr - HEAP_START;
-    u64 victim_offset;
+    // Copy to staging buffer
+    auto cache_gva = get_cache_gva(page);
+    // printf("Before\n");
+    memcpy((void *)cache_gva, (void *)victim_vaddr, PAGE_SIZE);
+    // printf("After\n");
+
+    // Get or allocate remote offset
     usize vpn = vaddr_to_vpn(victim_vaddr);
+    u64 victim_offset;
     auto offset_it = shard.remote_offsets.find(vpn);
     if (offset_it == shard.remote_offsets.end()) {
       victim_offset = next_swap_offset_.fetch_add(PAGE_SIZE);
       shard.remote_offsets[vpn] = victim_offset;
     } else {
-      // Reuse existing offset
       victim_offset = offset_it->second;
     }
 
-    auto cache_gva = get_cache_gva(page);
-    DEBUG("Swapping OUT: 0x%lx. Cache (gva->gpa): 0x%lx->0x%lx", victim_vaddr,
-          cache_gva, mapper_t::gva_to_gpa((void *)cache_gva));
+    DEBUG("Swapping OUT: 0x%lx to offset 0x%lx", victim_vaddr, victim_offset);
 
+    // Write from staging buffer
     int ret = storage_->write_page((void *)cache_gva, victim_offset);
     if (ret != 0) {
       PANIC("Failed to swap out: backend write failed (%d)", ret);
     }
 
     shard.set_page_state(victim_vaddr, PageState::RemotelyMapped);
-
     stats_.swap_outs++;
+
   } else if (page_state == PageState::Mapped) {
-    // clean page whose data is backed on the storage
+    // Clean page with copy on storage
     DEBUG("Evicting clean storage-backed page 0x%lx from cache slot %zu",
           victim_vaddr, get_page_idx(page));
-
     shard.set_page_state(victim_vaddr, PageState::RemotelyMapped);
-
     stats_.skipped_writes++;
+
   } else if (page_state == PageState::FreshlyMapped) {
-    // clean page that was never written: it can be discarded
+    // Never written - can discard
     DEBUG("Evicting fresh page 0x%lx from cache slot %zu", victim_vaddr,
           get_page_idx(page));
-
     shard.set_page_state(victim_vaddr, PageState::Unmapped);
-
     stats_.discards++;
   } else {
     UNREACHABLE(
         "A %s page (0x%lx) shouldn't cause a fault that needs a swap-out",
         page_state_to_str(page_state), victim_vaddr);
   }
+
+  madvise((void *)victim_vaddr, PAGE_SIZE, MADV_DONTNEED);
+  unmap_gva(victim_vaddr);
 
   page->reset();
 }
@@ -299,6 +296,8 @@ void Swapper::handle_fault(void *fault_addr, regstate_t *regstate) {
   stats_.total_faults++;
 
   uptr aligned_fault_vaddr = ALIGN_DOWN((uptr)fault_addr);
+  // map_gva((uptr)fault_addr);
+  // return;
   usize shard_idx = get_shard_idx(aligned_fault_vaddr);
   Shard &shard = shards_[shard_idx];
 
@@ -337,7 +336,7 @@ void Swapper::start_background_rebalancing() {
           // Rebalance lists
           demote_cold_pages(shard);
           promote_hot_pages(shard);
-          reap_cold_pages(shard);
+          // reap_cold_pages(shard);
         } else {
           stats_.rebalancer_skips++;
         }
@@ -413,31 +412,33 @@ void Swapper::promote_hot_pages(Shard &shard) {
   }
 }
 
+/*
 void Swapper::reap_cold_pages(Shard &shard) {
-  if (free_pages_queue_->size_approx() >= config.reap_reserve) {
-    return;
-  }
-
-  // if (free_pages_queue_.size() >= config.reap_reserve) {
-  //   return;
-  // }
-
-  usize evictions = 0;
-
-  // try to keep some amount of free space in the shard
-  while (!shard.inactive_pages.empty() &&
-         evictions < config.shard_reap_reserve) {
-    Page *victim_page = shard.inactive_pages.back();
-    shard.inactive_pages.pop_back();
-
-    swap_out_page(victim_page);
-    free_pages_queue_->enqueue(victim_page);
-    // free_pages_queue_.push(victim_page);
-
-    evictions++;
-    stats_.proactive_evictions++;
-  }
+if (free_pages_queue_->size_approx() >= config.reap_reserve) {
+  return;
 }
+
+// if (free_pages_queue_.size() >= config.reap_reserve) {
+//   return;
+// }
+
+usize evictions = 0;
+
+// try to keep some amount of free space in the shard
+while (!shard.inactive_pages.empty() &&
+       evictions < config.shard_reap_reserve) {
+  Page *victim_page = shard.inactive_pages.back();
+  shard.inactive_pages.pop_back();
+
+  swap_out_page(victim_page);
+  free_pages_queue_->enqueue(victim_page);
+  // free_pages_queue_.push(victim_page);
+
+  evictions++;
+  stats_.proactive_evictions++;
+}
+}
+*/
 
 void Swapper::adapt_rebalance_interval() {
   // atomically get and reset the counter

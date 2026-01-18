@@ -28,8 +28,7 @@ void handle_fault(void *fault_addr, regstate_t *regstate) {
     PANIC("Swapper not setup");
   }
 
-  // printf("CALLING FAULT HANDLER at %p. Error code: %lu\n", fault_addr,
-  //        regstate->error_code);
+  // printf("CALLING FAULT HANDLER at %p.\n", fault_addr);
 
   // uptr gva = ALIGN_DOWN((uptr)fault_addr);
   // mapper_t::double_map(gva, gva, PAGE_SIZE);
@@ -69,47 +68,36 @@ void virtual_main(void *any) {
   g_swapper = swapper.get();
 
   usize infinite_size = ALIGN_DOWN(UINT64_MAX);
-  auto seg = new segment_t(infinite_size, 0);
-  mapper_t::assign_handler(seg, handle_fault);
-  INFO("Fault handling segment registered: [0x%lx, 0x%lx)", (uptr)seg->start,
-       (uptr)seg->start + seg->size);
+  segment_t seg{infinite_size, 0};
+  mapper_t::assign_handler(&seg, handle_fault);
+  INFO("Fault handling segment registered: [0x%lx, 0x%lx)", (uptr)seg.start,
+       (uptr)seg.start + seg.size);
 
   g_alloc_hook = [](u64 addr, u64 len, u64 pte) {
-    std::string flags;
-    if (pte & PTE_P)
-      flags += "P";
-    if (pte & PTE_W)
-      flags += "W";
-    if (pte & PTE_U)
-      flags += "U";
-    if (pte & PTE_XD)
-      flags += "X";
+    mapper_t::double_map(addr, addr, len);
 
-    // INFO("Intercepted alloc: 0x%lx (len: %s, flags: %s [0x%lx])", addr,
-    //      human_readable_bytes(len).c_str(), flags.c_str(), pte);
+    // This does NOT remove the KVM Slot. It just clears the Present bit in CR3.
+    // Now the Guest cannot touch it, so it will fault.
+    mapper_t::unmap(addr, len);
   };
-
-  g_dealloc_hook = [](u64 addr, u64 len) {
-    // INFO("Intercepted deallocation: 0x%lx (len: %s)", addr,
-    //      human_readable_bytes(len).c_str());
-  };
+  g_dealloc_hook = [](u64 addr, u64 len) {};
 
   // std::thread t1([]() { ERROR("Foo"); });
   // t1.join();
 
   swapper->start_background_rebalancing();
 
-  /*
   //       x <= 100 no fault
   // 100 < x < 128  brk triggered
   //       x >= 128 mmap triggered
-  int *ptr = (int *)malloc(110 * MB);
-  if (ptr) {
-    *ptr = 65;
-    printf("Read %d\n", *ptr);
-  }
+  // int *ptr = (int *)malloc(110 * MB);
+  // if (ptr) {
+  //   *ptr = 65;
+  //   printf("Read %d\n", *ptr);
+  // }
   // free(ptr);
 
+  /*
   int *ptr2 = (int *)malloc(50 * MB);
   if (ptr2) {
     *ptr2 = 450;
