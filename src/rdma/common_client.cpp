@@ -211,9 +211,9 @@ int receive_server_metadata() {
     return ret;
   }
 
-  DEBUG("Server's swap area metadata received. addr: %p, len: %u, stag: 0x%x",
+  DEBUG("Server's swap area metadata received. addr: %p, len: %s, stag: 0x%x",
         (void *)swap_area_metadata.address,
-        (unsigned int)swap_area_metadata.length,
+        human_readable_bytes((unsigned int)swap_area_metadata.length).c_str(),
         swap_area_metadata.stag.local_stag);
 
   return 0;

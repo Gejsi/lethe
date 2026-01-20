@@ -25,8 +25,8 @@ void virtual_main(void *any) {
 
   s_benchmark_config_t *bench_config = (s_benchmark_config_t *)any;
 
-  auto seg = new segment_t(g_swapper->config.heap_size, HEAP_START);
-  mapper_t::assign_handler(seg, handle_fault);
+  segment_t seg{g_swapper->config.heap_size, HEAP_START};
+  mapper_t::assign_handler(&seg, handle_fault);
   INFO("Fault handling segment registered: [0x%lx, 0x%lx)", HEAP_START,
        (uptr)HEAP_START + g_swapper->config.heap_size);
 

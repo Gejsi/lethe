@@ -1,31 +1,41 @@
+#pragma once
+
 #include <atomic>
 #include <benchmark/data_interface.h>
 #include <cstddef>
 #include <cstdint>
 #include <unordered_map>
 
+#include "types.h"
+
 class BumpArena {
 public:
-  BumpArena(uintptr_t start, size_t size)
+  BumpArena(uptr start, usize size)
       : heap_end_(start + size), heap_current_(start) {}
 
-  uintptr_t allocate(size_t bytes, size_t alignment) {
-    uintptr_t old_current = heap_current_.fetch_add(bytes);
-    uintptr_t aligned_current =
-        (old_current + alignment - 1) & ~(alignment - 1);
+  uptr allocate(usize bytes, usize alignment) {
+    uptr current = heap_current_.load(std::memory_order_relaxed);
+    uptr aligned;
+    uptr new_current;
 
-    if (aligned_current + bytes > heap_end_) {
-      // Return 0 as an indicator of failure instead of throwing,
-      // since allocators shouldn't throw from allocate.
-      // The allocator will handle turning this into an exception.
-      return 0;
-    }
-    return aligned_current;
+    do {
+      aligned = (current + alignment - 1) & ~(alignment - 1);
+      new_current = aligned + bytes;
+
+      // OOM
+      if (new_current > heap_end_) {
+        return 0;
+      }
+    } while (!heap_current_.compare_exchange_weak(current, new_current,
+                                                  std::memory_order_relaxed,
+                                                  std::memory_order_relaxed));
+
+    return aligned;
   }
 
 private:
-  const uintptr_t heap_end_;
-  std::atomic<uintptr_t> heap_current_;
+  const uptr heap_end_;
+  std::atomic<uptr> heap_current_;
 };
 
 template <typename T> class BumpAllocator {
@@ -47,25 +57,23 @@ public:
   BumpAllocator(const BumpAllocator<U> &other) noexcept
       : arena_(other.arena_) {}
 
-  T *allocate(size_t n) {
+  T *allocate(usize n) {
     if (!arena_) {
       throw std::bad_alloc();
     }
 
-    constexpr size_t alignment = alignof(T);
-    size_t bytes = n * sizeof(T);
+    constexpr usize alignment = alignof(T);
+    usize bytes = n * sizeof(T);
 
-    uintptr_t ptr = arena_->allocate(bytes, alignment);
+    uptr ptr = arena_->allocate(bytes, alignment);
     if (ptr == 0) {
       throw std::bad_alloc();
     }
     return reinterpret_cast<T *>(ptr);
   }
 
-  void deallocate(T *ptr, size_t n) noexcept {
+  void deallocate(T *, usize) noexcept {
     // Bump allocator is a no-op for deallocation
-    (void)ptr;
-    (void)n;
   }
 };
 
@@ -81,7 +89,7 @@ bool operator!=(const BumpAllocator<T> &a, const BumpAllocator<U> &b) noexcept {
 
 class BumpMapDataLayer : public data_interface<uint64_t> {
 public:
-  BumpMapDataLayer(uintptr_t start, size_t size)
+  BumpMapDataLayer(uptr start, usize size)
       : arena_(start, size),
         map_(BumpAllocator<std::pair<const uint64_t, uint64_t>>(&arena_)) {}
 

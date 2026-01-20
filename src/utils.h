@@ -79,6 +79,7 @@ constexpr usize MB = KB * KB;
 constexpr usize GB = MB * KB;
 
 constexpr usize PAGE_SIZE = 4 * KB;
+#define ALIGN_DOWN(x) ((x) & ~((PAGE_SIZE) - 1))
 
 using Clock = std::chrono::steady_clock;
 using TimePoint = Clock::time_point;
@@ -87,3 +88,5 @@ using Milliseconds = std::chrono::milliseconds;
 constexpr const char *bool_to_str(bool b) noexcept;
 
 void sleep_ms(usize ms);
+
+std::string human_readable_bytes(u64 bytes);

@@ -41,7 +41,7 @@ Swapper::Swapper(SwapperConfig &&swapper_config,
       shards_(std::make_unique<Shard[]>(config.num_shards)),
       page_states_(
           std::make_unique<std::atomic<PageState>[]>(config.num_heap_pages)) {
-  // AsyncLogger::instance().init("swapper.log");
+  AsyncLogger::instance().init("swapper.log");
 
   cache_base_addr_ = storage_->get_cache_base_addr();
   if (!cache_base_addr_) {
@@ -49,207 +49,21 @@ Swapper::Swapper(SwapperConfig &&swapper_config,
         "Swapper initialized with a storage backend that has no cache address");
   }
 
-  for (size_t i = 0; i < config.num_pages; i++) {
+  for (usize i = 0; i < config.num_pages; i++) {
     free_pages_queue_.enqueue(&pages_[i]);
   }
 
-  for (size_t i = 0; i < config.num_heap_pages; ++i) {
+  for (usize i = 0; i < config.num_heap_pages; ++i) {
     page_states_[i].store(PageState::Unmapped, std::memory_order_relaxed);
   }
+
+  stats_.shard_stats = std::make_unique<ShardStats[]>(config.num_shards);
 
   INFO("Swapper initialized with %zu cache slots and %zu shards to handle them",
        config.num_pages, config.num_shards);
 }
 
 Swapper::~Swapper() { DEBUG("Destroyed Swapper"); }
-
-void Swapper::start_background_rebalancing() {
-  if (config.rebalancer_disabled) {
-    printf("Disabled\n");
-    return;
-  }
-
-  rebalancer_ = std::thread([this]() {
-    std::vector<size_t> shard_indices(config.num_shards);
-    for (size_t i = 0; i < config.num_shards; ++i)
-      shard_indices[i] = i;
-
-    std::random_device rd;
-    std::default_random_engine rng(rd());
-
-    while (rebalancer_running_.load()) {
-      sleep_ms(rebalance_interval_ms_);
-
-      // Shuffle the order of shards to rebalance
-      std::shuffle(shard_indices.begin(), shard_indices.end(), rng);
-
-      for (usize shard_idx : shard_indices) {
-        Shard &shard = shards_[shard_idx];
-
-        std::unique_lock<std::mutex> lock(shard.mutex, std::try_to_lock);
-
-        if (lock.owns_lock()) {
-          // Rebalance lists
-          demote_cold_pages(shard);
-          promote_hot_pages(shard);
-          reap_cold_pages(shard);
-        } else {
-          stats_.rebalancer_skips++;
-        }
-
-        if (!rebalancer_running_.load()) {
-          return;
-        }
-      }
-
-      // Adapt the interval at which this thread runs
-      adapt_rebalance_interval();
-    }
-  });
-}
-
-void Swapper::stop_background_rebalancing() {
-  if (config.rebalancer_disabled) {
-    printf("Disabled\n");
-    return;
-  }
-
-  rebalancer_running_ = false;
-
-  if (rebalancer_.joinable()) {
-    rebalancer_.join();
-  }
-}
-
-void Swapper::print_state() {
-  // printf("Num pages: %zu -> Free: %zu, Inactive: %zu, Active: %zu\n",
-  // NUM_PAGES,
-  //        free_pages_.size(), inactive_pages_.size(), active_pages_.size());
-
-  // printf("=== Free Pages (%zu) ===\n", free_pages_.size());
-  // for (auto p : free_pages_) {
-  //   p->print();
-  // }
-
-  // printf("=== Inactive Pages (%zu) ===\n", inactive_pages_.size());
-  // for (auto p : inactive_pages_) {
-  //   p->print();
-  // }
-
-  // printf("=== Active Pages (%zu) ===\n", active_pages_.size());
-  // for (auto p : active_pages_) {
-  //   p->print();
-  // }
-
-  size_t mapped_count = 0;
-  for (size_t i = 0; i < config.num_heap_pages; ++i) {
-    if (page_states_[i].load() != PageState::Unmapped) {
-      mapped_count++;
-    }
-  }
-  printf("=== Mappings (%zu) ===\n", mapped_count);
-  for (size_t i = 0; i < config.num_heap_pages; ++i) {
-    PageState state = page_states_[i].load();
-    if (state != PageState::Unmapped) {
-      uptr vaddr = HEAP_START + (i * PAGE_SIZE);
-      printf("0x%lx -> %s\n", vaddr, page_state_to_str(state));
-    }
-  }
-}
-
-void Swapper::print_stats() {
-  usize total_faults = stats_.total_faults.load();
-  usize swap_ins = stats_.swap_ins.load();
-  usize swap_outs = stats_.swap_outs.load();
-  usize skipped_writes = stats_.skipped_writes.load();
-  usize discards = stats_.discards.load();
-  usize reactive_evictions = stats_.reactive_evictions.load();
-  usize proactive_evictions = stats_.proactive_evictions.load();
-  usize promotions = stats_.promotions.load();
-
-  // total evictions, categorized by content (dirty/clean)
-  usize total_evictions_by_content = swap_outs + skipped_writes + discards;
-  // total evictions, categorized by trigger (proactive/reactive)
-  usize total_evictions_by_trigger = proactive_evictions + reactive_evictions;
-  ENSURE(total_evictions_by_content == total_evictions_by_trigger,
-         "Number of total evictions doesn't match");
-
-  double swap_in_ratio =
-      (total_faults > 0)
-          ? static_cast<double>(swap_ins) / static_cast<double>(total_faults)
-          : 0.0;
-
-  double churn_rate = (total_evictions_by_content > 0)
-                          ? static_cast<double>(swap_ins) /
-                                static_cast<double>(total_evictions_by_content)
-                          : 0.0;
-
-  double dirty_ratio = (total_evictions_by_content > 0)
-                           ? static_cast<double>(swap_outs) /
-                                 static_cast<double>(total_evictions_by_content)
-                           : 0.0;
-
-  double proactive_efficiency =
-      (total_evictions_by_trigger > 0)
-          ? static_cast<double>(proactive_evictions) /
-                static_cast<double>(total_evictions_by_trigger)
-          : 0.0;
-
-  double stall_rate = (total_evictions_by_trigger > 0)
-                          ? static_cast<double>(reactive_evictions) /
-                                static_cast<double>(total_evictions_by_trigger)
-                          : 0.0;
-
-  double promotion_ratio =
-      (promotions + total_evictions_by_content > 0)
-          ? static_cast<double>(promotions) /
-                static_cast<double>(promotions + total_evictions_by_content)
-          : 0.0;
-
-  printf("=================================================================\n");
-  printf("PERFORMANCE METRICS:\n");
-  printf("  - Swap-In Ratio:        %.2f%% (%.0f / %.0f faults were for "
-         "remote pages)\n",
-         swap_in_ratio * 100.0, static_cast<double>(swap_ins),
-         static_cast<double>(total_faults));
-  printf("  - Swap-Out Ratio:       %.2f%% (%.0f / %.0f evictions required a "
-         "write-back)\n",
-         dirty_ratio * 100.0, static_cast<double>(swap_outs),
-         static_cast<double>(total_evictions_by_content));
-  printf("  - Proactive Efficiency: %.2f%% (%.0f / %.0f total evictions were "
-         "proactive)\n",
-         proactive_efficiency * 100.0, static_cast<double>(proactive_evictions),
-         static_cast<double>(total_evictions_by_trigger));
-  printf("  - Stall Rate:           %.2f%% (%.0f / %.0f total evictions "
-         "stalled the app)\n",
-         stall_rate * 100.0, static_cast<double>(reactive_evictions),
-         static_cast<double>(total_evictions_by_trigger));
-  printf("  - Churn Rate:           %.2f%% (%.0f / %.0f swap-ins over "
-         "evictions)\n",
-         churn_rate * 100.0, static_cast<double>(swap_ins),
-         static_cast<double>(total_evictions_by_content));
-  printf("  - Promotion Ratio:      %.2f%% (%.0f / %.0f inactive pages were "
-         "promoted)\n",
-         promotion_ratio * 100.0, static_cast<double>(promotions),
-         static_cast<double>(promotions + total_evictions_by_content));
-
-  printf("\nCOUNTERS:\n");
-  printf("  - Total Page Faults:    %zu\n", total_faults);
-  printf("    - Demand Zeros:       %zu\n", stats_.demand_zeros.load());
-  printf("    - Swap-Ins:           %zu\n", swap_ins);
-  printf("  - Total Evictions:      %zu\n", total_evictions_by_content);
-  printf("    - Swap-Outs:          %zu\n", swap_outs);
-  printf("    - Skipped writes:     %zu\n", skipped_writes);
-  printf("    - Discards:           %zu\n", discards);
-  printf("  - Eviction Triggers:\n");
-  printf("    - Proactive (Reaper): %zu\n", proactive_evictions);
-  printf("    - Reactive (Stall):   %zu\n", reactive_evictions);
-  printf("  - LRU List Activity:\n");
-  printf("    - Promotions:         %zu\n", promotions);
-  printf("    - Demotions:          %zu\n", stats_.demotions.load());
-  printf("    - Rebalancer skips:   %zu\n", stats_.rebalancer_skips.load());
-  printf("=================================================================\n");
-}
 
 usize Swapper::get_page_idx(Page *page) { return (usize)(page - pages_.get()); }
 
@@ -396,7 +210,7 @@ void Swapper::handle_fault(void *fault_addr, regstate_t *regstate) {
         regstate->error_code);
 
   // align to page boundary
-  uptr aligned_fault_vaddr = (uptr)fault_addr & ~(PAGE_SIZE - 1);
+  uptr aligned_fault_vaddr = ALIGN_DOWN((uptr)fault_addr);
 
   // faulting address should be within the heap
   if (aligned_fault_vaddr < HEAP_START ||
@@ -409,6 +223,7 @@ void Swapper::handle_fault(void *fault_addr, regstate_t *regstate) {
 
   usize shard_idx = get_shard_idx(aligned_fault_vaddr);
   Shard &shard = shards_[shard_idx];
+  stats_.shard_stats[shard_idx].faults++;
 
   {
     std::lock_guard<std::mutex> lock(shard.mutex);
@@ -418,7 +233,88 @@ void Swapper::handle_fault(void *fault_addr, regstate_t *regstate) {
   }
 }
 
+void Swapper::start_background_rebalancing() {
+  if (config.rebalancer_disabled) {
+    return;
+  }
+
+  rebalancer_ = std::thread([this]() {
+    std::vector<usize> shard_indices(config.num_shards);
+    for (usize i = 0; i < config.num_shards; ++i)
+      shard_indices[i] = i;
+
+    std::random_device rd;
+    std::default_random_engine rng(rd());
+
+    while (rebalancer_running_.load()) {
+      auto cycle_start = Clock::now();
+
+      sleep_ms(rebalance_interval_ms_);
+
+      // Shuffle the order of shards to rebalance
+      std::shuffle(shard_indices.begin(), shard_indices.end(), rng);
+
+      for (usize shard_idx : shard_indices) {
+        Shard &shard = shards_[shard_idx];
+
+        std::unique_lock<std::mutex> lock(shard.mutex, std::try_to_lock);
+
+        if (lock.owns_lock()) {
+          stats_.shard_stats[shard_idx].active_size_sum +=
+              shard.active_pages.size();
+          stats_.shard_stats[shard_idx].inactive_size_sum +=
+              shard.inactive_pages.size();
+          stats_.shard_stats[shard_idx].samples++;
+
+          // Rebalance lists
+          demote_cold_pages(shard);
+          promote_hot_pages(shard);
+          reap_cold_pages(shard);
+        } else {
+          stats_.rebalancer_skips++;
+        }
+
+        if (!rebalancer_running_.load()) {
+          return;
+        }
+      }
+
+      stats_.rebalancer_stats.total_cycles++;
+      stats_.rebalancer_stats.current_interval_ms = rebalance_interval_ms_;
+
+      // Track time spent at extremes
+      if (rebalance_interval_ms_ == MIN_INTERVAL_MS) {
+        auto cycle_duration =
+            std::chrono::duration_cast<Milliseconds>(Clock::now() - cycle_start)
+                .count();
+        stats_.rebalancer_stats.time_at_min_ms += (usize)cycle_duration;
+      } else if (rebalance_interval_ms_ == MAX_INTERVAL_MS) {
+        auto cycle_duration =
+            std::chrono::duration_cast<Milliseconds>(Clock::now() - cycle_start)
+                .count();
+        stats_.rebalancer_stats.time_at_max_ms += (usize)cycle_duration;
+      }
+
+      // Adapt the interval at which this thread runs
+      adapt_rebalance_interval();
+    }
+  });
+}
+
+void Swapper::stop_background_rebalancing() {
+  if (config.rebalancer_disabled) {
+    return;
+  }
+
+  rebalancer_running_ = false;
+
+  if (rebalancer_.joinable()) {
+    rebalancer_.join();
+  }
+}
+
 void Swapper::demote_cold_pages(Shard &shard) {
+  usize shard_idx = static_cast<usize>(&shard - &shards_[0]);
   // iterate from the back (warm pages) to the front (hottest pages)
   for (auto it = shard.active_pages.rbegin();
        it != shard.active_pages.rend();) {
@@ -442,11 +338,14 @@ void Swapper::demote_cold_pages(Shard &shard) {
           shard.active_pages.erase(std::next(it).base()));
 
       stats_.demotions++;
+      stats_.shard_stats[shard_idx].demotions++;
     }
   }
 }
 
 void Swapper::promote_hot_pages(Shard &shard) {
+  usize shard_idx = static_cast<usize>(&shard - &shards_[0]);
+
   for (auto it = shard.inactive_pages.begin();
        it != shard.inactive_pages.end();) {
     auto cold_page = *it;
@@ -459,6 +358,7 @@ void Swapper::promote_hot_pages(Shard &shard) {
       clear_permissions(cold_page->vaddr, PTE_A);
 
       stats_.promotions++;
+      stats_.shard_stats[shard_idx].promotions++;
     } else {
       // page is still cold, keep it in the inactive list
       ++it;
@@ -500,6 +400,8 @@ void Swapper::adapt_rebalance_interval() {
          "frequency to %u ms",
          evictions, rebalance_interval_ms_);
 
+    stats_.rebalancer_stats.pressure_events++;
+
     // reset the cooldown counter
     stable_cycles_ = 0;
   } else {
@@ -514,6 +416,8 @@ void Swapper::adapt_rebalance_interval() {
       INFO("[ADAPT] Stable system: increased rebalancing frequency to %u ms",
            rebalance_interval_ms_);
 
+      stats_.rebalancer_stats.relaxation_events++;
+
       // reset the counter to require another
       // full cooldown period before the next increase
       stable_cycles_ = 0;
@@ -522,4 +426,144 @@ void Swapper::adapt_rebalance_interval() {
     // if the cooldown threshold wasn't reached,
     // maintain the current interval
   }
+
+  stats_.rebalancer_stats.current_stable_cycles = stable_cycles_;
+}
+
+void Swapper::print_stats() {
+  usize total_faults = stats_.total_faults.load();
+  usize swap_ins = stats_.swap_ins.load();
+  usize swap_outs = stats_.swap_outs.load();
+  usize skipped_writes = stats_.skipped_writes.load();
+  usize discards = stats_.discards.load();
+  usize reactive_evictions = stats_.reactive_evictions.load();
+  usize proactive_evictions = stats_.proactive_evictions.load();
+  usize promotions = stats_.promotions.load();
+
+  usize total_evictions = swap_outs + skipped_writes + discards;
+
+  // Calculate metrics
+  double swap_in_ratio =
+      (total_faults > 0) ? (double)swap_ins / (double)total_faults : 0.0;
+  double working_set_hit_rate = 1.0 - swap_in_ratio;
+  double dirty_ratio =
+      (total_evictions > 0) ? (double)swap_outs / (double)total_evictions : 0.0;
+  double pollution_rate =
+      (total_evictions > 0) ? (double)discards / (double)total_evictions : 0.0;
+  double proactive_efficiency =
+      (total_evictions > 0)
+          ? (double)proactive_evictions / (double)total_evictions
+          : 0.0;
+  double stall_rate = (total_evictions > 0)
+                          ? (double)reactive_evictions / (double)total_evictions
+                          : 0.0;
+
+  printf("=================================================================\n");
+  printf("PERFORMANCE METRICS:\n");
+  printf(
+      "  - Working Set Hit Rate: %.2f%% (%zu cache hits out of %zu faults)\n",
+      working_set_hit_rate * 100.0, total_faults - swap_ins, total_faults);
+  printf("  - Swap-In Ratio:        %.2f%% (%zu remote fetches)\n",
+         swap_in_ratio * 100.0, swap_ins);
+  printf("  - Dirty Page Ratio:     %.2f%% (%zu write-backs / %zu evictions)\n",
+         dirty_ratio * 100.0, swap_outs, total_evictions);
+  printf("  - Cache Pollution:      %.2f%% (%zu discarded fresh pages)\n",
+         pollution_rate * 100.0, discards);
+  printf("  - Proactive Efficiency: %.2f%% (%zu proactive / %zu total "
+         "evictions)\n",
+         proactive_efficiency * 100.0, proactive_evictions, total_evictions);
+  printf("  - Stall Rate:           %.2f%% (%zu reactive evictions)\n",
+         stall_rate * 100.0, reactive_evictions);
+
+  printf("\nREBALANCER ADAPTATION:\n");
+  printf("  - Total Cycles:           %lu\n",
+         stats_.rebalancer_stats.total_cycles);
+  printf("  - Current Interval:       %lu ms (stable for %lu cycles)\n",
+         stats_.rebalancer_stats.current_interval_ms,
+         stats_.rebalancer_stats.current_stable_cycles);
+  printf("  - Pressure Events:        %lu (decreased interval)\n",
+         stats_.rebalancer_stats.pressure_events);
+  printf("  - Relaxation Events:      %lu (increased interval)\n",
+         stats_.rebalancer_stats.relaxation_events);
+  printf("  - Time at MIN (%u ms):    %zu ms (%.1f%% of runtime)\n",
+         MIN_INTERVAL_MS, stats_.rebalancer_stats.time_at_min_ms,
+         100.0 * (double)stats_.rebalancer_stats.time_at_min_ms /
+             (double)(stats_.rebalancer_stats.total_cycles *
+                      rebalance_interval_ms_));
+  printf("  - Time at MAX (%u ms):  %zu ms (%.1f%% of runtime)\n",
+         MAX_INTERVAL_MS, stats_.rebalancer_stats.time_at_max_ms,
+         100.0 * (double)stats_.rebalancer_stats.time_at_max_ms /
+             (double)(stats_.rebalancer_stats.total_cycles *
+                      rebalance_interval_ms_));
+
+  // Analyze shard imbalance
+  printf("\nSHARD LOAD DISTRIBUTION:\n");
+
+  std::vector<std::pair<usize, usize>> shard_faults;
+  usize max_faults = 0, min_faults = ULONG_MAX;
+
+  for (usize i = 0; i < config.num_shards; ++i) {
+    usize faults = stats_.shard_stats[i].faults.load();
+    shard_faults.push_back({i, faults});
+    max_faults = std::max(max_faults, faults);
+    min_faults = std::min(min_faults, faults);
+  }
+
+  std::sort(shard_faults.begin(), shard_faults.end(),
+            [](auto &a, auto &b) { return a.second > b.second; });
+
+  double imbalance =
+      (min_faults > 0) ? (double)max_faults / (double)min_faults : 0.0;
+
+  printf("  - Load Imbalance:       %.2fx (max/min faults per shard)\n",
+         imbalance);
+
+  printf("  - Hottest 5 Shards:\n");
+  for (usize i = 0; i < std::min(5UL, shard_faults.size()); ++i) {
+    usize idx = shard_faults[i].first;
+    usize faults = shard_faults[i].second;
+    double avg_active = stats_.shard_stats[idx].samples > 0
+                            ? (double)stats_.shard_stats[idx].active_size_sum /
+                                  (double)stats_.shard_stats[idx].samples
+                            : 0;
+    double avg_inactive =
+        stats_.shard_stats[idx].samples > 0
+            ? (double)stats_.shard_stats[idx].inactive_size_sum /
+                  (double)stats_.shard_stats[idx].samples
+            : 0;
+
+    printf("    Shard %4zu: %8zu faults, avg %.1f active, %.1f inactive\n", idx,
+           faults, avg_active, avg_inactive);
+  }
+
+  printf("  - Coldest 5 Shards:\n");
+  for (usize i = 0; i < std::min(5UL, shard_faults.size()); ++i) {
+    usize pos = shard_faults.size() - 1 - i;
+    usize idx = shard_faults[pos].first;
+    usize faults = shard_faults[pos].second;
+    double avg_active = stats_.shard_stats[idx].samples > 0
+                            ? (double)stats_.shard_stats[idx].active_size_sum /
+                                  (double)stats_.shard_stats[idx].samples
+                            : 0;
+    double avg_inactive =
+        stats_.shard_stats[idx].samples > 0
+            ? (double)stats_.shard_stats[idx].inactive_size_sum /
+                  (double)stats_.shard_stats[idx].samples
+            : 0;
+
+    printf("    Shard %4zu: %8zu faults, avg %.1f active, %.1f inactive\n", idx,
+           faults, avg_active, avg_inactive);
+  }
+
+  printf("\nRAW COUNTERS:\n");
+  printf("  - Total Faults:         %zu (demand zeros: %zu, swap-ins: %zu)\n",
+         total_faults, stats_.demand_zeros.load(), swap_ins);
+  printf("  - Total Evictions:      %zu\n", total_evictions);
+  printf("    └─ Dirty (swap-out):  %zu\n", swap_outs);
+  printf("    └─ Clean (skip):      %zu\n", skipped_writes);
+  printf("    └─ Fresh (discard):   %zu\n", discards);
+  printf("  - LRU Activity:         %zu promotions, %zu demotions\n",
+         promotions, stats_.demotions.load());
+  printf("  - Rebalancer Skips:     %zu\n", stats_.rebalancer_skips.load());
+  printf("=================================================================\n");
 }

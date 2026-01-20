@@ -10,7 +10,7 @@
 #include "storage/storage.h"
 #include "utils.h"
 
-constexpr usize SWAP_SIZE = 16 * GB;
+constexpr usize SWAP_SIZE = 512 * MB;
 constexpr uptr HEAP_START = 0xffff800000000000;
 
 constexpr bool pte_is_present(u64 pte);
@@ -26,7 +26,7 @@ void map_gva(uptr gva, uptr gpa);
 void unmap_gva(uptr gva);
 
 struct SwapperConfig {
-  usize cache_size = 112 * MB;
+  usize cache_size = 128 * MB;
   usize num_shards = 2048;
   bool rebalancer_disabled = false;
 
@@ -98,7 +98,7 @@ struct Page {
 
   Page() : vaddr(0) {}
 
-  void reset() { *this = Page{}; }
+  void reset() { vaddr = 0; }
 
   void print(bool inline_output = true) const {
     if (inline_output) {
@@ -123,6 +123,29 @@ struct alignas(64) Shard {
   std::atomic<u64> oldest_age{0};
 };
 
+struct ShardStats {
+  std::atomic<usize> faults = 0;
+  std::atomic<usize> evictions = 0;
+  std::atomic<usize> lock_contentions = 0;
+  std::atomic<usize> promotions = 0;
+  std::atomic<usize> demotions = 0;
+
+  // Sampled by rebalancer
+  usize active_size_sum = 0;
+  usize inactive_size_sum = 0;
+  usize samples = 0;
+};
+
+struct RebalancerStats {
+  usize total_cycles = 0;
+  usize pressure_events = 0;
+  usize relaxation_events = 0;
+  usize current_interval_ms = 0;
+  usize current_stable_cycles = 0;
+  usize time_at_min_ms = 0;
+  usize time_at_max_ms = 0;
+};
+
 struct SwapperStats {
   std::atomic<usize> total_faults = 0;
   std::atomic<usize> demand_zeros = 0;
@@ -142,6 +165,9 @@ struct SwapperStats {
   std::atomic<usize> promotions = 0;
   std::atomic<usize> demotions = 0;
   std::atomic<usize> rebalancer_skips = 0;
+
+  std::unique_ptr<ShardStats[]> shard_stats;
+  RebalancerStats rebalancer_stats;
 };
 
 class Swapper {
@@ -163,8 +189,6 @@ public:
   void promote_hot_pages(Shard &shard);
   // Reap: proactively reclaim cold pages if below a reserve target
   void reap_cold_pages(Shard &shard);
-
-  void print_state();
 
   void print_stats();
 
@@ -189,11 +213,9 @@ private:
 
   std::unique_ptr<Storage> storage_; // The abstract storage backend
   void *cache_base_addr_;            // The base address of the cache
-  // Fixed-size array describing where a faulting address
-  // is located in the physical cache
+  // Fixed-size array describing where a page is located in the cache
   std::unique_ptr<Page[]> pages_;
-  // Unmapped pages in the cache
-  // TODO: implement my own simpler lock-free queue
+  // Unmapped slots in the cache
   moodycamel::ConcurrentQueue<Page *> free_pages_queue_;
 
   std::unique_ptr<Shard[]> shards_;
