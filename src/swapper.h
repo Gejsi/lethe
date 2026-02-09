@@ -26,9 +26,9 @@ void map_gva(uptr gva, uptr gpa);
 void unmap_gva(uptr gva);
 
 struct SwapperConfig {
-  usize cache_size = 128 * MB;
-  usize num_shards = 2048;
-  bool rebalancer_disabled = false;
+  usize cache_size = 64 * MB;
+  usize num_shards = 64;
+  bool rebalancer_disabled = true;
 
   usize num_pages;
   usize heap_size;
@@ -60,7 +60,8 @@ struct SwapperConfig {
 };
 
 enum class PageState : u8 {
-  // Cache slot is empty: access triggers a demand-zero allocation
+  // Cache slot is empty: access triggers a demand-zero allocation.
+  // NOTE: keep this as the first entry of the enum
   Unmapped,
 
   // Page is in cache but has NO copy on the storage:
@@ -117,10 +118,6 @@ struct alignas(64) Shard {
   // Lists used to organize the pages mapped in the cache with a LRU policy
   std::list<Page *> active_pages;
   std::list<Page *> inactive_pages;
-
-  // save the oldest page (back of inactive list).
-  // 0 = Empty, UINT64_MAX = Newest.
-  std::atomic<u64> oldest_age{0};
 };
 
 struct ShardStats {
@@ -156,11 +153,9 @@ struct SwapperStats {
   std::atomic<usize> skipped_writes = 0;
   // evictions of FreshlyMapped clean pages
   std::atomic<usize> discards = 0;
-  // evictions that happened because
-  // no free slot was find in the cache
+  // evictions that happened because no free slot was find in the cache
   std::atomic<usize> reactive_evictions = 0;
-  // evictions that happened because
-  // of the background reaper
+  // evictions that happened because of the background reaper
   std::atomic<usize> proactive_evictions = 0;
   std::atomic<usize> promotions = 0;
   std::atomic<usize> demotions = 0;
@@ -195,7 +190,6 @@ public:
   SwapperConfig config;
 
 private:
-  // TODO: improve error handling of these two methods
   void swap_in_page(Page *page, uptr aligned_fault_vaddr);
   void swap_out_page(Page *page);
 
@@ -217,7 +211,7 @@ private:
   std::unique_ptr<Page[]> pages_;
   // Unmapped slots in the cache
   moodycamel::ConcurrentQueue<Page *> free_pages_queue_;
-
+  // Split the cache into smaller shards each with their own two-list LRU
   std::unique_ptr<Shard[]> shards_;
 
   // Track the state of all pages, both on the cache and on the swap area

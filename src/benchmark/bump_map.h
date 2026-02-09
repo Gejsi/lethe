@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <stdexcept>
 #include <benchmark/data_interface.h>
 #include <cstddef>
 #include <cstdint>
@@ -87,30 +88,30 @@ bool operator!=(const BumpAllocator<T> &a, const BumpAllocator<U> &b) noexcept {
   return a.arena_ != b.arena_;
 }
 
-class BumpMapDataLayer : public data_interface<uint64_t> {
+class BumpMapDataLayer : public data_interface<u64> {
 public:
   BumpMapDataLayer(uptr start, usize size)
       : arena_(start, size),
-        map_(BumpAllocator<std::pair<const uint64_t, uint64_t>>(&arena_)) {}
+        map_(BumpAllocator<std::pair<const u64, u64>>(&arena_)) {}
 
-  int insert(uint64_t key, uint64_t value) override {
+  int insert(u64 key, u64 value) override {
     std::lock_guard<std::mutex> lock(mutex_);
     map_[key] = value;
     return 0;
   }
 
-  int update(uint64_t key, uint64_t value) override {
+  int update(u64 key, u64 value) override {
     std::lock_guard<std::mutex> lock(mutex_);
     map_[key] = value;
     return 1;
   }
 
-  uint64_t remove(uint64_t key) override {
+  u64 remove(u64 key) override {
     std::lock_guard<std::mutex> lock(mutex_);
     return map_.erase(key);
   }
 
-  uint64_t get(uint64_t key) override {
+  u64 get(u64 key) override {
     std::lock_guard<std::mutex> lock(mutex_);
     try {
       return map_.at(key);
@@ -119,12 +120,12 @@ public:
     }
   }
 
-  int is_null(uint64_t key) override {
+  int is_null(u64 key) override {
     std::lock_guard<std::mutex> lock(mutex_);
     return map_.count(key) == 0;
   }
 
-  uint64_t dummy() override {
+  u64 dummy() override {
     std::lock_guard<std::mutex> lock(mutex_);
     return map_.size();
   };
@@ -132,12 +133,11 @@ public:
 private:
   BumpArena arena_;
 
-  std::unordered_map<
-      uint64_t,                // Key
-      uint64_t,                // Value
-      std::hash<uint64_t>,     // Hasher
-      std::equal_to<uint64_t>, // Key equality checker
-      BumpAllocator<std::pair<const uint64_t, uint64_t>>> // Allocator
+  std::unordered_map<u64,                // Key
+                     u64,                // Value
+                     std::hash<u64>,     // Hasher
+                     std::equal_to<u64>, // Key equality checker
+                     BumpAllocator<std::pair<const u64, u64>>> // Allocator
       map_;
 
   std::mutex mutex_;

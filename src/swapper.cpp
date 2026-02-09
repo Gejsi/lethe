@@ -37,24 +37,13 @@ void unmap_gva(uptr gva) {
 Swapper::Swapper(SwapperConfig &&swapper_config,
                  std::unique_ptr<Storage> storage)
     : config(std::move(swapper_config)), storage_(std::move(storage)),
+      cache_base_addr_(storage_->get_cache_base_addr()),
       pages_(std::make_unique<Page[]>(config.num_pages)),
       shards_(std::make_unique<Shard[]>(config.num_shards)),
       page_states_(
           std::make_unique<std::atomic<PageState>[]>(config.num_heap_pages)) {
-  AsyncLogger::instance().init("swapper.log");
-
-  cache_base_addr_ = storage_->get_cache_base_addr();
-  if (!cache_base_addr_) {
-    PANIC(
-        "Swapper initialized with a storage backend that has no cache address");
-  }
-
   for (usize i = 0; i < config.num_pages; i++) {
     free_pages_queue_.enqueue(&pages_[i]);
-  }
-
-  for (usize i = 0; i < config.num_heap_pages; ++i) {
-    page_states_[i].store(PageState::Unmapped, std::memory_order_relaxed);
   }
 
   stats_.shard_stats = std::make_unique<ShardStats[]>(config.num_shards);
@@ -487,17 +476,21 @@ void Swapper::print_stats() {
          stats_.rebalancer_stats.relaxation_events);
   printf("  - Time at MIN (%u ms):    %zu ms (%.1f%% of runtime)\n",
          MIN_INTERVAL_MS, stats_.rebalancer_stats.time_at_min_ms,
-         100.0 * (double)stats_.rebalancer_stats.time_at_min_ms /
-             (double)(stats_.rebalancer_stats.total_cycles *
-                      rebalance_interval_ms_));
+         (stats_.rebalancer_stats.total_cycles) > 0
+             ? 100.0 * (double)stats_.rebalancer_stats.time_at_min_ms /
+                   (double)(stats_.rebalancer_stats.total_cycles *
+                            rebalance_interval_ms_)
+             : 0);
   printf("  - Time at MAX (%u ms):  %zu ms (%.1f%% of runtime)\n",
          MAX_INTERVAL_MS, stats_.rebalancer_stats.time_at_max_ms,
-         100.0 * (double)stats_.rebalancer_stats.time_at_max_ms /
-             (double)(stats_.rebalancer_stats.total_cycles *
-                      rebalance_interval_ms_));
+         (stats_.rebalancer_stats.total_cycles) > 0
+             ? 100.0 * (double)stats_.rebalancer_stats.time_at_max_ms /
+                   (double)(stats_.rebalancer_stats.total_cycles *
+                            rebalance_interval_ms_)
+             : 0);
 
   // Analyze shard imbalance
-  printf("\nSHARD LOAD DISTRIBUTION:\n");
+  printf("\n%lu SHARDS LOAD DISTRIBUTION:\n", config.num_shards);
 
   std::vector<std::pair<usize, usize>> shard_faults;
   usize max_faults = 0, min_faults = ULONG_MAX;
