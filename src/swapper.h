@@ -26,9 +26,9 @@ void map_gva(uptr gva, uptr gpa);
 void unmap_gva(uptr gva);
 
 struct SwapperConfig {
-  usize cache_size = 64 * MB;
+  usize cache_size = 100 * MB;
   usize num_shards = 64;
-  bool rebalancer_disabled = true;
+  bool rebalancer_enabled = true;
 
   usize num_pages;
   usize heap_size;
@@ -49,7 +49,7 @@ struct SwapperConfig {
   // move constructor: derives values when moved
   SwapperConfig(SwapperConfig &&other) noexcept
       : cache_size(other.cache_size), num_shards(other.num_shards),
-        rebalancer_disabled(other.rebalancer_disabled),
+        rebalancer_enabled(other.rebalancer_enabled),
         num_pages(cache_size / PAGE_SIZE), heap_size(cache_size + SWAP_SIZE),
         num_heap_pages(heap_size / PAGE_SIZE),
         reap_reserve((usize)((double)num_pages * 0.2)),
@@ -219,9 +219,9 @@ private:
 
   std::thread rebalancer_;
   std::atomic<bool> rebalancer_running_{true};
-  // how often the rebalance thread runs, recomputed at runtime
+  // how often the rebalancer runs, recomputed at runtime
   u32 rebalance_interval_ms_ = (MAX_INTERVAL_MS + MIN_INTERVAL_MS) / 2;
-  // shared between fault handler and the rebalance thread
+  // shared between fault handler and the rebalancer
   std::atomic<u32> evictions_in_cycle_ = 0;
   // how many cycles passed without the pressure of too many evictions
   u32 stable_cycles_ = 0;

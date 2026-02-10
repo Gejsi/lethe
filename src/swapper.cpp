@@ -223,7 +223,7 @@ void Swapper::handle_fault(void *fault_addr, regstate_t *regstate) {
 }
 
 void Swapper::start_background_rebalancing() {
-  if (config.rebalancer_disabled) {
+  if (!config.rebalancer_enabled) {
     return;
   }
 
@@ -291,7 +291,7 @@ void Swapper::start_background_rebalancing() {
 }
 
 void Swapper::stop_background_rebalancing() {
-  if (config.rebalancer_disabled) {
+  if (!config.rebalancer_enabled) {
     return;
   }
 

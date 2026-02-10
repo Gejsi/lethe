@@ -66,44 +66,69 @@ void virtual_main(void *any) {
   DEBUG("--- Exiting VM ---");
 }
 
+static void print_usage(const char *prog, const SwapperConfig &config) {
+  printf("Usage: %s [options]\n\n", prog);
+  printf("Benchmark options:\n");
+  printf("  -t, --threads <n>      Number of threads (default: 1)\n");
+  printf(
+      "  -k, --keys <n>         Number of keys to load (default: 3000000)\n");
+  printf("  -o, --ops <n>          Number of operations to run (default: "
+         "1000000)\n");
+  printf("  -d, --dist <type>      Distribution: uniform|zipfian (default: "
+         "zipfian)\n");
+  printf("  -w, --workload <A-D>   YCSB workload: A|B|C|D (default: A)\n");
+  printf("\nSwapper options:\n");
+  printf("  -m, --cache-mb <n>     Cache size in MB (default: %zu)\n",
+         config.cache_size / MB);
+  printf("  -c, --cache-gb <n>     Cache size in GB\n");
+  printf("  -r, --rebalance <0|1>  Toggle rebalancer (default: %d)\n",
+         config.rebalancer_enabled);
+  printf("  -S, --num-shards <n>   Number of LRU shards (default: %zu)\n",
+         config.num_shards);
+  printf("\nRDMA options:\n");
+  printf("  -a, --addr <ip>        Server address (default: %s)\n",
+         DEFAULT_SERVER_ADDR);
+  printf("  -p, --port <n>         Server port (default: %d)\n",
+         DEFAULT_RDMA_PORT);
+  printf("\n  -h, --help             Show this help message\n");
+}
+
+static u8 parse_workload(const char *arg) {
+  if (strlen(arg) == 1) {
+    switch (arg[0]) {
+    case 'A':
+    case 'a':
+    case '0':
+      return 0;
+    case 'B':
+    case 'b':
+    case '1':
+      return 1;
+    case 'C':
+    case 'c':
+    case '2':
+      return 2;
+    case 'D':
+    case 'd':
+    case '3':
+      return 3;
+    default:
+      break;
+    }
+  }
+  PANIC("Invalid workload '%s'. Choose A, B, C, or D", arg);
+}
+
 int main(int argc, char **argv) {
   AsyncLogger::instance().init("swapper.log");
   SwapperConfig swapper_config;
 
-  if (argc < 6) {
-    printf("Usage: %s <NUM_THREADS> ... <WORKLOAD> [options]\n", argv[0]);
-    printf("Options:\n");
-    printf("  -a <ip>        Server address\n");
-    printf("  -p <port>      Server port (default: %d)\n", DEFAULT_RDMA_PORT);
-    printf("  -c, --cache-gb <size>  Cache size in GB (default: %zu GB)\n",
-           swapper_config.cache_size / GB);
-    printf("  -m, --cache-mb <size>  Cache size in MB (default: %zu MB)\n",
-           swapper_config.cache_size / MB);
-    printf("  -n, --no-rebalancer <0|1> Toggle rebalancer (default: %d)\n",
-           swapper_config.rebalancer_disabled);
-    printf("  -S, --num-shards <num> Number of LRU shards (default: %zu)\n",
-           swapper_config.num_shards);
-    exit(1);
-  }
-
-  const unsigned int num_threads = (unsigned int)atoi(argv[1]);
-  const unsigned int load_num_keys = (unsigned int)atoi(argv[2]);
-  const unsigned int num_ops = (unsigned int)atoi(argv[3]);
-  const enum distribution distribution =
-      strcmp(argv[4], "uniform") == 0 ? UNIFORM : ZIPFIAN;
-  const uint8_t workload = (uint8_t)atoi(argv[5]);
-
-  s_benchmark_config_t bench_config{.num_threads = num_threads,
-                                    .load_num_keys = load_num_keys,
-                                    .num_ops = num_ops,
-                                    .distribution = distribution,
-                                    .workload = workload,
-                                    .output_file = "./data/outputfile",
-                                    .data_dir = "./data",
-                                    .tsc = 2095008,
-                                    .metric = METRIC::THROUGHPUT,
-                                    .hook = NULL,
-                                    .args = NULL};
+  // Benchmark defaults
+  u32 num_threads = 1;
+  u32 load_num_keys = 3000000;
+  u32 num_ops = 1000000;
+  enum distribution dist = ZIPFIAN;
+  u8 workload = 0; // workload A
 
   struct sockaddr_in server_sockaddr;
   memset(&server_sockaddr, 0, sizeof(server_sockaddr));
@@ -112,25 +137,60 @@ int main(int argc, char **argv) {
   int ret;
   ret = inet_pton(AF_INET, DEFAULT_SERVER_ADDR, &server_sockaddr.sin_addr);
   if (ret <= 0) {
-    if (ret == 0)
+    if (ret == 0) {
       ERROR("Invalid address string: %s", DEFAULT_SERVER_ADDR);
-    else
+    } else {
       perror("inet_pton");
+    }
     return -1;
   }
 
   int option_index = 0;
-  struct option long_options[] = {{"cache-gb", required_argument, 0, 'c'},
+  struct option long_options[] = {{"threads", required_argument, 0, 't'},
+                                  {"keys", required_argument, 0, 'k'},
+                                  {"ops", required_argument, 0, 'o'},
+                                  {"dist", required_argument, 0, 'd'},
+                                  {"workload", required_argument, 0, 'w'},
                                   {"cache-mb", required_argument, 0, 'm'},
-                                  {"rebalancer", required_argument, 0, 'n'},
+                                  {"cache-gb", required_argument, 0, 'c'},
+                                  {"rebalance", required_argument, 0, 'r'},
                                   {"num-shards", required_argument, 0, 'S'},
-
+                                  {"addr", required_argument, 0, 'a'},
+                                  {"port", required_argument, 0, 'p'},
+                                  {"help", no_argument, 0, 'h'},
                                   {0, 0, 0, 0}};
 
   int option;
-  while ((option = getopt_long(argc, argv, "a:p:c:m:n:S:", long_options,
-                               &option_index)) != -1) {
+  while ((option = getopt_long(argc, argv, "t:k:o:d:w:m:c:r:S:a:p:h",
+                               long_options, &option_index)) != -1) {
     switch (option) {
+    case 't':
+      num_threads = (u32)atoi(optarg);
+      break;
+    case 'k':
+      load_num_keys = (u32)atol(optarg);
+      break;
+    case 'o':
+      num_ops = (u32)atol(optarg);
+      break;
+    case 'd':
+      dist = strcmp(optarg, "uniform") == 0 ? UNIFORM : ZIPFIAN;
+      break;
+    case 'w':
+      workload = parse_workload(optarg);
+      break;
+    case 'm':
+      swapper_config.cache_size = (usize)atol(optarg) * MB;
+      break;
+    case 'c':
+      swapper_config.cache_size = (usize)atol(optarg) * GB;
+      break;
+    case 'r':
+      swapper_config.rebalancer_enabled = (bool)atoi(optarg);
+      break;
+    case 'S':
+      swapper_config.num_shards = (usize)atol(optarg);
+      break;
     case 'a':
       ret = get_addr(optarg, (struct sockaddr *)&server_sockaddr);
       if (ret) {
@@ -140,23 +200,26 @@ int main(int argc, char **argv) {
     case 'p':
       server_sockaddr.sin_port = htons((u16)strtol(optarg, NULL, 0));
       break;
-    case 'c':
-      swapper_config.cache_size = (usize)atol(optarg) * GB;
-      break;
-    case 'm':
-      swapper_config.cache_size = (usize)atol(optarg) * MB;
-      break;
-    case 'n':
-      swapper_config.rebalancer_disabled = (bool)atoi(optarg);
-      break;
-    case 'S':
-      swapper_config.num_shards = (usize)atol(optarg);
-      break;
+    case 'h':
+      print_usage(argv[0], swapper_config);
+      return EXIT_SUCCESS;
     default:
-      ERROR("Unknown option or missing argument for option '%c'", option);
-      break;
+      print_usage(argv[0], swapper_config);
+      return EXIT_FAILURE;
     }
   }
+
+  s_benchmark_config_t bench_config{.num_threads = num_threads,
+                                    .load_num_keys = load_num_keys,
+                                    .num_ops = num_ops,
+                                    .distribution = dist,
+                                    .workload = workload,
+                                    .output_file = "./data/outputfile",
+                                    .data_dir = "./data",
+                                    .tsc = 2095008,
+                                    .metric = METRIC::THROUGHPUT,
+                                    .hook = NULL,
+                                    .args = NULL};
 
   if (!server_sockaddr.sin_port) {
     server_sockaddr.sin_port = htons(DEFAULT_RDMA_PORT);
