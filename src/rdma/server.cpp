@@ -322,9 +322,8 @@ static void init_swap_area_for_test() {
 static void cleanup() {
   int ret;
 
-  // Order of destruction should generally be reverse of allocation,
-  // or based on dependencies (e.g., QPs before CQs/PDs they use, MRs before
-  // PDs).
+  // Order of destruction should generally be reverse of allocation, or based on
+  // dependencies (e.g., QPs before CQs/PDs they use, MRs before PDs).
   // Client-specific resources (QP, CM ID, MRs)
   if (cm_client_id) {
     if (cm_client_id->qp) {
@@ -471,7 +470,7 @@ int main(int argc, char **argv) {
   }
   if (!server_sockaddr.sin_port) {
     /* If still zero, that mean no port info provided */
-    server_sockaddr.sin_port = htons(DEFAULT_RDMA_PORT); /* use default port */
+    server_sockaddr.sin_port = htons(DEFAULT_RDMA_PORT);
   }
   ret = start_rdma_server(&server_sockaddr);
   if (ret) {

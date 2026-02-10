@@ -120,7 +120,7 @@ static u8 parse_workload(const char *arg) {
 }
 
 int main(int argc, char **argv) {
-  AsyncLogger::instance().init("swapper.log");
+  // AsyncLogger::instance().init("swapper.log");
   SwapperConfig swapper_config;
 
   // Benchmark defaults
@@ -142,7 +142,7 @@ int main(int argc, char **argv) {
     } else {
       perror("inet_pton");
     }
-    return -1;
+    return EXIT_FAILURE;
   }
 
   int option_index = 0;
