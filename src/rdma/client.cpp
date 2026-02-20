@@ -125,8 +125,10 @@ int main(int argc, char **argv) {
 
   // Benchmark defaults
   u32 num_threads = 1;
-  u32 load_num_keys = 3000000;
-  u32 num_ops = 1000000;
+  // 60 Million keys * ~60 bytes per entry ≈ 3.4 GB
+  // bytes per entry ≈ Key + Value + std::map pointers/overhead
+  u32 load_num_keys = 60000000; // 60 million keys
+  u32 num_ops = 20000000;       // 20 million ops
   enum distribution dist = ZIPFIAN;
   u8 workload = 0; // workload A
 
@@ -216,7 +218,7 @@ int main(int argc, char **argv) {
                                     .workload = workload,
                                     .output_file = "./data/outputfile",
                                     .data_dir = "./data",
-                                    .tsc = 2095008,
+                                    .tsc = 0,
                                     .metric = METRIC::THROUGHPUT,
                                     .hook = NULL,
                                     .args = NULL};

@@ -10,7 +10,7 @@
 #include "storage/storage.h"
 #include "utils.h"
 
-constexpr usize SWAP_SIZE = 512 * MB;
+constexpr usize SWAP_SIZE = 10 * GB;
 constexpr uptr HEAP_START = 0xffff800000000000;
 
 constexpr bool pte_is_present(u64 pte);
@@ -26,7 +26,7 @@ void map_gva(uptr gva, uptr gpa);
 void unmap_gva(uptr gva);
 
 struct SwapperConfig {
-  usize cache_size = 100 * MB;
+  usize cache_size = 1850 * MB;
   usize num_shards = 64;
   bool rebalancer_enabled = true;
 

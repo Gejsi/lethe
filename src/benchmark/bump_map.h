@@ -1,10 +1,10 @@
 #pragma once
 
 #include <atomic>
-#include <stdexcept>
 #include <benchmark/data_interface.h>
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 #include <unordered_map>
 
 #include "types.h"
@@ -95,24 +95,24 @@ public:
         map_(BumpAllocator<std::pair<const u64, u64>>(&arena_)) {}
 
   int insert(u64 key, u64 value) override {
-    std::lock_guard<std::mutex> lock(mutex_);
+    // std::lock_guard<std::mutex> lock(mutex_);
     map_[key] = value;
     return 0;
   }
 
   int update(u64 key, u64 value) override {
-    std::lock_guard<std::mutex> lock(mutex_);
+    // std::lock_guard<std::mutex> lock(mutex_);
     map_[key] = value;
     return 1;
   }
 
   u64 remove(u64 key) override {
-    std::lock_guard<std::mutex> lock(mutex_);
+    // std::lock_guard<std::mutex> lock(mutex_);
     return map_.erase(key);
   }
 
   u64 get(u64 key) override {
-    std::lock_guard<std::mutex> lock(mutex_);
+    // std::lock_guard<std::mutex> lock(mutex_);
     try {
       return map_.at(key);
     } catch (const std::out_of_range &oor) {
@@ -121,12 +121,12 @@ public:
   }
 
   int is_null(u64 key) override {
-    std::lock_guard<std::mutex> lock(mutex_);
+    // std::lock_guard<std::mutex> lock(mutex_);
     return map_.count(key) == 0;
   }
 
   u64 dummy() override {
-    std::lock_guard<std::mutex> lock(mutex_);
+    // std::lock_guard<std::mutex> lock(mutex_);
     return map_.size();
   };
 
@@ -140,5 +140,5 @@ private:
                      BumpAllocator<std::pair<const u64, u64>>> // Allocator
       map_;
 
-  std::mutex mutex_;
+  // std::mutex mutex_;
 };

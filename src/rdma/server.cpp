@@ -258,9 +258,9 @@ static int send_server_metadata_to_client() {
    * allocated, we just register it. We need to prepare a send I/O operation
    * that will tell the client the address of the server buffer.
    */
-  server_metadata_attr.address = (uint64_t)swap_area->addr;
-  server_metadata_attr.length = (uint32_t)swap_area->length;
-  server_metadata_attr.stag.local_stag = (uint32_t)swap_area->lkey;
+  server_metadata_attr.address = (u64)swap_area->addr;
+  server_metadata_attr.length = (u64)swap_area->length;
+  server_metadata_attr.stag.local_stag = (u32)swap_area->lkey;
   server_metadata_mr = rdma_buffer_register(
       pd /* which protection domain*/,
       &server_metadata_attr /* which memory to register */,

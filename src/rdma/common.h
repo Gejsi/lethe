@@ -61,14 +61,14 @@ constexpr u16 DEFAULT_RDMA_PORT = 8080; // 20886
  * and the client. Pack it to avoid padding from the compiler.
  */
 struct __attribute((packed)) rdma_buffer_attr {
-  uint64_t address;
-  uint32_t length;
+  u64 address;
+  u64 length;
   // Steering Tag (or memory key)
   union stag {
     /* if we send, we call it local stag */
-    uint32_t local_stag;
+    u32 local_stag;
     /* if we receive, we call it remote stag */
-    uint32_t remote_stag;
+    u32 remote_stag;
   } stag;
 };
 
