@@ -6,7 +6,6 @@
 #include <volimem/volimem.h>
 
 #include "benchmark/bump_map.h"
-#include "benchmark/std_map.h"
 #include "common_client.h"
 #include "logger.h"
 #include "storage/rdma_storage.h"
