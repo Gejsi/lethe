@@ -7,7 +7,6 @@
 
 #include "benchmark/bump_map.h"
 #include "common_client.h"
-#include "logger.h"
 #include "storage/rdma_storage.h"
 #include "swapper.h"
 
@@ -39,14 +38,16 @@ void virtual_main(void *any) {
   if (!cache_area) {
     PANIC("Failed to allocate and register the cache inside VM");
   }
-  INFO("Cache area allocated inside VM at %p", (void *)cache_area->addr);
+  INFO("Cache area of %s allocated inside VM at %p",
+       human_readable_bytes(args->swapper_config.cache_size).c_str(),
+       (void *)cache_area->addr);
 
   auto rdma_storage = std::make_unique<RDMAStorage>(
       client_qp, io_completion_channel, cache_area, swap_area_metadata);
 
   auto swapper = std::make_unique<Swapper>(std::move(args->swapper_config),
                                            std::move(rdma_storage));
-  // global swapper set for the fault handler
+  // global swapper, set because needed by the fault handler
   g_swapper = swapper.get();
 
   segment_t seg{g_swapper->config.heap_size, HEAP_START};
@@ -54,13 +55,10 @@ void virtual_main(void *any) {
   INFO("Fault handling segment registered: [0x%lx, 0x%lx)", HEAP_START,
        (uptr)HEAP_START + g_swapper->config.heap_size);
 
-  g_swapper->start_background_rebalancing();
-
   BumpMapDataLayer data_layer(HEAP_START, g_swapper->config.heap_size);
   run_benchmark(bench_config, &data_layer);
 
   g_swapper->print_stats();
-  g_swapper->stop_background_rebalancing();
 
   DEBUG("--- Exiting VM ---");
 }
@@ -80,10 +78,6 @@ static void print_usage(const char *prog, const SwapperConfig &config) {
   printf("  -m, --cache-mb <n>     Cache size in MB (default: %zu)\n",
          config.cache_size / MB);
   printf("  -c, --cache-gb <n>     Cache size in GB\n");
-  printf("  -r, --rebalance <0|1>  Toggle rebalancer (default: %d)\n",
-         config.rebalancer_enabled);
-  printf("  -S, --num-shards <n>   Number of LRU shards (default: %zu)\n",
-         config.num_shards);
   printf("\nRDMA options:\n");
   printf("  -a, --addr <ip>        Server address (default: %s)\n",
          DEFAULT_SERVER_ADDR);
@@ -119,7 +113,9 @@ static u8 parse_workload(const char *arg) {
 }
 
 int main(int argc, char **argv) {
+  // To enable logs, uncomment this line and include logger.h
   // AsyncLogger::instance().init("swapper.log");
+
   SwapperConfig swapper_config;
 
   // Benchmark defaults
@@ -154,16 +150,14 @@ int main(int argc, char **argv) {
                                   {"workload", required_argument, 0, 'w'},
                                   {"cache-mb", required_argument, 0, 'm'},
                                   {"cache-gb", required_argument, 0, 'c'},
-                                  {"rebalance", required_argument, 0, 'r'},
-                                  {"num-shards", required_argument, 0, 'S'},
                                   {"addr", required_argument, 0, 'a'},
                                   {"port", required_argument, 0, 'p'},
                                   {"help", no_argument, 0, 'h'},
                                   {0, 0, 0, 0}};
 
   int option;
-  while ((option = getopt_long(argc, argv, "t:k:o:d:w:m:c:r:S:a:p:h",
-                               long_options, &option_index)) != -1) {
+  while ((option = getopt_long(argc, argv, "t:k:o:d:w:m:c:a:p:h", long_options,
+                               &option_index)) != -1) {
     switch (option) {
     case 't':
       num_threads = (u32)atoi(optarg);
@@ -185,12 +179,6 @@ int main(int argc, char **argv) {
       break;
     case 'c':
       swapper_config.cache_size = (usize)atol(optarg) * GB;
-      break;
-    case 'r':
-      swapper_config.rebalancer_enabled = (bool)atoi(optarg);
-      break;
-    case 'S':
-      swapper_config.num_shards = (usize)atol(optarg);
       break;
     case 'a':
       ret = get_addr(optarg, (struct sockaddr *)&server_sockaddr);
