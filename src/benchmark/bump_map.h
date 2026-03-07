@@ -3,9 +3,8 @@
 #include <atomic>
 #include <benchmark/data_interface.h>
 #include <cstddef>
-#include <stdexcept>
-#include <unordered_map>
 
+#include "concurrent_map.h"
 #include "types.h"
 
 class BumpArena {
@@ -94,50 +93,27 @@ public:
         map_(BumpAllocator<std::pair<const u64, u64>>(&arena_)) {}
 
   int insert(u64 key, u64 value) override {
-    // std::lock_guard<std::mutex> lock(mutex_);
-    map_[key] = value;
+    map_.insert(key, value);
     return 0;
   }
 
   int update(u64 key, u64 value) override {
-    // std::lock_guard<std::mutex> lock(mutex_);
-    map_[key] = value;
+    map_.update(key, value);
     return 1;
   }
 
-  u64 remove(u64 key) override {
-    // std::lock_guard<std::mutex> lock(mutex_);
-    return map_.erase(key);
-  }
+  u64 remove(u64 key) override { return map_.erase(key); }
 
-  u64 get(u64 key) override {
-    // std::lock_guard<std::mutex> lock(mutex_);
-    try {
-      return map_.at(key);
-    } catch (const std::out_of_range &oor) {
-      return 0;
-    }
-  }
+  u64 get(u64 key) override { return map_.get(key); }
 
-  int is_null(u64 key) override {
-    // std::lock_guard<std::mutex> lock(mutex_);
-    return map_.count(key) == 0;
-  }
+  int is_null(u64 key) override { return map_.count(key) == 0; }
 
-  u64 dummy() override {
-    // std::lock_guard<std::mutex> lock(mutex_);
-    return map_.size();
-  };
+  u64 dummy() override { return map_.size(); };
 
 private:
   BumpArena arena_;
 
-  std::unordered_map<u64,                // Key
-                     u64,                // Value
-                     std::hash<u64>,     // Hasher
-                     std::equal_to<u64>, // Key equality checker
-                     BumpAllocator<std::pair<const u64, u64>>> // Allocator
+  ConcurrentUnorderedMap<u64, u64, false,
+                         BumpAllocator<std::pair<const u64, u64>>>
       map_;
-
-  // std::mutex mutex_;
 };
