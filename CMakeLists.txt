@@ -141,6 +141,13 @@ target_link_libraries(run_benchmark PRIVATE common ${KV_BENCHMARK_LIBRARY})
 # Add the necessary include directory so it can find "benchmark/benchmark.h"
 target_include_directories(run_benchmark SYSTEM PRIVATE ${KV_BENCHMARK_INCLUDE_DIR})
 
+# Run benchmark inside VoliMem (no swapper, no RDMA, isolates VM overhead)
+add_executable(run_benchmark_volimem
+  ${SRC}/benchmark/run_benchmark_volimem.cpp
+)
+target_link_libraries(run_benchmark_volimem PRIVATE common ${KV_BENCHMARK_LIBRARY})
+target_include_directories(run_benchmark_volimem SYSTEM PRIVATE ${KV_BENCHMARK_INCLUDE_DIR})
+
 # If no build type is specified (-DCMAKE_BUILD_TYPE=Release) default to Debug
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Debug CACHE STRING "Choose build type: Debug, Release, RelWithDebInfo, MinSizeRel" FORCE)

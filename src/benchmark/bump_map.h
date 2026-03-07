@@ -3,7 +3,6 @@
 #include <atomic>
 #include <benchmark/data_interface.h>
 #include <cstddef>
-#include <cstdint>
 #include <stdexcept>
 #include <unordered_map>
 
@@ -74,11 +73,11 @@ public:
   }
 
   void deallocate(T *, usize) noexcept {
-    // Bump allocator is a no-op for deallocation
+    // no-op for bump allocator
   }
 };
 
-// Equality comparison (all instances are equal - stateless allocator)
+// Equality comparison (stateless allocator: all instances are equal)
 template <typename T, typename U>
 bool operator==(const BumpAllocator<T> &a, const BumpAllocator<U> &b) noexcept {
   return a.arena_ == b.arena_;

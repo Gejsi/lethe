@@ -2,9 +2,8 @@
 #include <cstdio>
 #include <cstdlib>
 
-#include "bump_map.h"
 #include "std_map.h"
-#include "swapper.h"
+#include "types.h"
 
 // LD_PRELOAD=lib/liblethe.so bin/run_benchmark 1 10000 100000 zipfian 0
 int main(int argc, char **argv) {
